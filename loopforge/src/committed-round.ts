@@ -21,7 +21,7 @@ import type {
   CheckpointRef,
   CompiledRoundFacts,
   ContractBinding,
-  ContractTransition,
+  ContractSupersede,
   EvidencePosture,
   ExecutionReport,
   LoopRoundResult,
@@ -47,7 +47,6 @@ import {
 import type { RoundTransactionSnapshot } from "./round-transaction.js";
 import {
   effectiveOutcome,
-  parseContractTransition,
   parseRoundContract,
 } from "./self-eval.js";
 import { entryRound, isRecord } from "./token-utils.js";
@@ -94,15 +93,21 @@ export interface CommittedRoundView {
    *  only on a hand-built/library view. */
   readonly evidencePosture: EvidencePosture | null;
   readonly action: CommittedAction;
-  /** v4.0.3: the Agent's success claim (never a machine verdict). */
+  /** v4.0.3/v4.0.6: the Agent's success claim — a derived projection of
+   *  `outcome === "success"`, never a machine verdict. */
   readonly agentSuccessClaim: boolean;
-  /** v4.0.3: the effective Agent-declared outcome. */
+  /** v4.0.6: the Agent-declared outcome. */
   readonly agentOutcome: RoundOutcome | null;
+  /** v4.0.6: the Agent's committed overall-objective refinement, if this
+   *  round carried one. The latest such value on the current branch is the
+   *  working objective text. */
+  readonly objectiveRefinement?: string;
   readonly contractProposal: RoundContractProposal | null;
-  /** v3.9.9: this round's explicit contract redirection, if it declared one.
-   *  Read from the committed evaluation; a target the reducer cannot match is
-   *  inert, never a reason to close a contract. */
-  readonly contractTransition: ContractTransition | null;
+  /** v4.0.6: this round's explicit contract redirection, DERIVED from the
+   *  committed proposal's optional `supersedes` (never a second persisted
+   *  field). A target the reducer cannot match is inert, never a reason to
+   *  close a contract. */
+  readonly contractRedirect: ContractSupersede | null;
   /** v3.8: the machine binding stamped when the declaring round committed. */
   readonly contractBinding: ContractBinding | null;
   readonly beforeEvidence: MachineObservation[];
@@ -218,6 +223,9 @@ function viewFromSnapshot(input: {
   const beforeEvidence = snapshots(snapshot.beforeEvidence);
   const afterEvidence = snapshots(snapshot.afterEvidence);
   const observationDelta = deriveRoundObservationDelta(beforeEvidence, afterEvidence);
+  const contractProposal = evaluation?.round_contract
+    ? parseRoundContract(evaluation.round_contract) ?? null
+    : null;
   return {
     source: input.source,
     sourceEntry: input.sourceEntry,
@@ -247,12 +255,12 @@ function viewFromSnapshot(input: {
     action,
     agentSuccessClaim: result.agentSuccessClaim === true,
     agentOutcome: result.agentOutcome ?? outcome,
-    contractProposal: evaluation?.round_contract
-      ? parseRoundContract(evaluation.round_contract) ?? null
-      : null,
-    contractTransition: evaluation
-      ? parseContractTransition(evaluation.contract_transition) ?? null
-      : null,
+    ...(evaluation && typeof evaluation.objective_refinement === "string" &&
+        evaluation.objective_refinement.trim().length > 0
+      ? { objectiveRefinement: evaluation.objective_refinement }
+      : {}),
+    contractProposal,
+    contractRedirect: contractProposal?.supersedes ?? null,
     contractBinding: snapshot.contractBinding ?? null,
     beforeEvidence,
     afterEvidence,
@@ -295,10 +303,9 @@ export function decodeCommittedRound(entry: VaultEntry): CommittedRoundView | nu
   const resultValue = isRecord(transaction.result)
     ? transaction.result
     : snapshot.result;
-  // v4.0.3/v4.0.4: a current-schema (8) committed result must carry a
-  // well-formed Evidence Posture and the Agent's `agent_stop_reason` lives in
-  // its evaluation. Missing/corrupt posture is a HARD break, not something to
-  // re-derive at read time.
+  // v4.0.3/v4.0.6: a current-schema (9) committed result must carry a
+  // well-formed Evidence Posture and a well-formed Agent outcome. A missing or
+  // corrupt posture/result is a HARD break, never re-derived at read time.
   if (!isRecord(resultValue) || !isProcessResult(resultValue)) return null;
   return viewFromSnapshot({
     source: "feedback",

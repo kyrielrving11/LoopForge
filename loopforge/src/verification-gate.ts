@@ -26,7 +26,7 @@ import { afterObservations, gitDeltaState } from "./evidence-provider.js";
 import { deriveFilesReconciliation } from "./files-reconciliation.js";
 import { isPassedAfterObservation } from "./evidence-provider.js";
 import type { EntrypointDrift } from "./evidence-provider.js";
-import { getPolicy } from "./policy.js";
+import { deriveConfiguredCapability, getPolicy } from "./policy.js";
 import type {
   ExecutionReport,
   GateActionDescriptor,
@@ -48,9 +48,11 @@ import {
   type CommittedRoundView,
 } from "./committed-round.js";
 import {
+  acceptanceItemsDiffer,
   sameContract,
   type ActiveContractView,
 } from "./round-contract.js";
+import { deriveContractRequirement } from "./contract-requirement.js";
 import type { ContractItemStatusView } from "./contract-items.js";
 import { deriveRoundFacts, type RoundFacts } from "./round-facts.js";
 import {
@@ -76,11 +78,6 @@ import { deriveGate, preflightStructuredGate } from "./cognitive-governance.js";
 
 export const CHECK_SUCCESS_WITH_REMAINING_CRITERIA = "success_with_remaining_criteria";
 export const CHECK_SUCCESS_WITHOUT_VERIFIED_EVIDENCE = "success_without_verified_evidence";
-// v3.7: single id for the outcome-vs-success axis — error when a declared
-// success contradicts success=false, warn when success=true but the outcome
-// declares a non-success (the former success_claim_conflict direction).
-export const CHECK_OUTCOME_SUCCESS_CONTRADICTION = "outcome_success_contradiction";
-export const CHECK_BLOCKED_WITHOUT_BLOCKER = "blocked_without_blocker";
 export const CHECK_RETROACTIVE_CLAIM_BAD_ROUND = "retroactive_claim_bad_round";
 export const CHECK_RETROACTIVE_CLAIM_UNVERIFIED = "retroactive_claim_unverified";
 export const CHECK_DUPLICATE_CONSTRAINT_DISCOVERY = "duplicate_constraint_discovery";
@@ -88,7 +85,6 @@ export const CHECK_RECURRING_VIOLATION = "recurring_violation";
 export const CHECK_RETRACT_FRESH_CONSTRAINT = "retract_fresh_constraint";
 export const CHECK_EVIDENCE_INTEGRITY = "evidence_integrity";
 export const CHECK_REQUIRED_COMMAND_FAILED = "required_command_failed";
-export const CHECK_COMMAND_EVIDENCE_MISMATCH = "command_evidence_mismatch";
 /** v3.3: Verification domain integrity — a command entrypoint (run-tests.sh,
  *  package.json, …) changed in the same round the command ran. The runtime
  *  executed a script the agent just rewrote, so the observation has no
@@ -123,11 +119,19 @@ export const CHECK_CONTRACT_ITEMS_UNVERIFIED = "contract_items_unverified";
  *  contract's declared scope. Warn; v3.8: not waivable by explanation — the
  *  enforcement gate rejects, and repeated drift terminates. */
 export const CHECK_ROUND_SCOPE_DRIFT = "round_scope_drift";
-/** v3.5: The ACTIVE contract is still open (not completed, not blocked)
- *  while a different contract was proposed — the proposal is ignored until
- *  the active one closes. Warn: the walker still ignores it; this only
- *  surfaces the otherwise-silent state. */
+/** v3.5/v4.0.6: The ACTIVE contract is still open (not completed, not
+ *  blocked) while a different contract was proposed WITHOUT `supersedes`.
+ *  Error: a different slice is never silently saved and ignored. To replace
+ *  the active slice, add `round_contract.supersedes` naming it. */
 export const CHECK_CONTRACT_PREMATURE = "contract_premature";
+/** v4.0.6: A continuing round with contract capability would leave the next
+ *  round without an active contract. Error: with after-capable commands, a
+ *  continuing round must leave a contract for the next round. */
+export const CHECK_CONTRACT_REQUIRED = "contract_required";
+/** v4.0.6: A successor proposal repeats the closed contract's ACCEPTANCE ITEMS
+ *  verbatim (only work_item/scope changed). Error: a successor must bring
+ *  genuinely new acceptance conditions, or it would re-verify the old slice. */
+export const CHECK_CONTRACT_SUCCESSOR_UNCHANGED = "contract_successor_unchanged";
 /** v3.7.1: A cited gate (evaluation.gate_ids) is not approved. Opt-in:
  *  checked ONLY when policy.gate.enabled — citations are meaningless when
  *  the gate layer is off. Error → enforcement rejects the round. */
@@ -156,8 +160,6 @@ export type VerificationDomain =
 export const CHECK_DOMAIN: Readonly<Record<string, VerificationDomain>> = {
   // ── evaluation_consistency ────────────────────────────────────────────────
   [CHECK_SUCCESS_WITH_REMAINING_CRITERIA]: "evaluation_consistency",
-  [CHECK_OUTCOME_SUCCESS_CONTRADICTION]: "evaluation_consistency",
-  [CHECK_BLOCKED_WITHOUT_BLOCKER]: "evaluation_consistency",
   [CHECK_RETROACTIVE_CLAIM_BAD_ROUND]: "evaluation_consistency",
   [CHECK_RETROACTIVE_CLAIM_UNVERIFIED]: "evaluation_consistency",
   [CHECK_DUPLICATE_CONSTRAINT_DISCOVERY]: "evaluation_consistency",
@@ -168,13 +170,14 @@ export const CHECK_DOMAIN: Readonly<Record<string, VerificationDomain>> = {
   [CHECK_CRITERIA_CLAIMS_UNVERIFIED]: "evidence_integrity",
   [CHECK_EVIDENCE_INTEGRITY]: "evidence_integrity",
   [CHECK_REQUIRED_COMMAND_FAILED]: "evidence_integrity",
-  [CHECK_COMMAND_EVIDENCE_MISMATCH]: "evidence_integrity",
   [CHECK_VERIFICATION_ENTRYPOINT_MODIFIED]: "evidence_integrity",
   [CHECK_TEST_FILES_MODIFIED]: "evidence_integrity",
   // ── plan_contract ─────────────────────────────────────────────────────────
   [CHECK_CONTRACT_ITEMS_UNVERIFIED]: "plan_contract",
   [CHECK_ROUND_SCOPE_DRIFT]: "plan_contract",
   [CHECK_CONTRACT_PREMATURE]: "plan_contract",
+  [CHECK_CONTRACT_REQUIRED]: "plan_contract",
+  [CHECK_CONTRACT_SUCCESSOR_UNCHANGED]: "plan_contract",
   // v3.7.1: cited-gate authorization conformance (opt-in blocking layer).
   [CHECK_USER_GATE_UNRESOLVED]: "plan_contract",
   // ── progress_recovery ─────────────────────────────────────────────────────
@@ -310,6 +313,13 @@ export function deriveEvidenceStatus(
   };
 }
 
+/** Whether a changed path looks like a test file. */
+function isTestFile(path: string): boolean {
+  return /\.(test|spec)\.[a-z0-9]+$/i.test(path) ||
+    /(^|[\/])tests?[\/]/i.test(path) ||
+    /_test\.[a-z0-9]+$/i.test(path);
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Individual checks — each returns a VerificationFlag or null
 // ═══════════════════════════════════════════════════════════════════════════
@@ -324,10 +334,10 @@ function checkSuccessWithRemainingCriteria(
 
   return makeVerificationFlag({
     severity: "error",
-    field: "success",
+    field: "outcome",
     check: CHECK_SUCCESS_WITH_REMAINING_CRITERIA,
     detail:
-      `Agent claims success but ${remaining.length} criteria remain unmet: ` +
+      `outcome=success but ${remaining.length} criteria remain unmet: ` +
       remaining.slice(0, 3).join("; "),
   });
 }
@@ -359,44 +369,6 @@ function checkUnverifiedCriteriaClaims(
       "machine-verified: " + unverified.slice(0, 3).join("; ") +
       (unverified.length > 3 ? " …" : ""),
   });
-}
-
-/** Declared outcome vs the core success flag — one check id for the whole
- *  axis (v3.7: the former success_claim_conflict warn direction merged here).
- *  A declared success with success=false is a self-contradiction (error);
- *  success=true with a non-success outcome is an inconsistent claim (warn).
- *  Also: outcome==="blocked" without a blocker description gets a warn so the
- *  next prompt asks for it. */
-function checkOutcomeConsistency(
-  selfEval: SelfEvaluation,
-): VerificationFlag | null {
-  const outcome = selfEval.outcome;
-  if (outcome === "success" && selfEval.success === false) {
-    return makeVerificationFlag({
-      severity: "error",
-      field: "outcome",
-      check: CHECK_OUTCOME_SUCCESS_CONTRADICTION,
-      detail: "outcome=success but success=false — self-contradictory",
-    });
-  }
-  if (outcome !== undefined && outcome !== "success" && selfEval.success === true) {
-    return makeVerificationFlag({
-      severity: "warn",
-      field: "success",
-      check: CHECK_OUTCOME_SUCCESS_CONTRADICTION,
-      detail: `outcome=${outcome} but success=true — the declared outcome wins`,
-    });
-  }
-  if (outcome === "blocked" &&
-      (typeof selfEval.blocker !== "string" || selfEval.blocker.trim().length === 0)) {
-    return makeVerificationFlag({
-      severity: "warn",
-      field: "blocker",
-      check: CHECK_BLOCKED_WITHOUT_BLOCKER,
-      detail: "outcome=blocked but no blocker description was provided",
-    });
-  }
-  return null;
 }
 
 /** v2.12: Retroactive claims reference PRIOR rounds. Each claim's file
@@ -454,11 +426,10 @@ function checkRetroactiveClaims(
 
 /** v2.12/v3.6/v3.7/v3.9.1: success without machine backing — the single
  *  "success evidence" semantic. Two arms, evaluated in order:
- *  1. Empty/missing-report arm: success=true with NO execution_report at all,
- *     or with files_changed empty AND tests_reported null, is a WARN. It is a
- *     reporting gap, not an acceptance gate: 3.9.1 does not reject a round
- *     because an optional report field was not filled. The warn still keeps
- *     success out of the success trajectory.
+ *  1. Missing-report arm: outcome=success with NO execution_report at all is
+ *     a WARN. It is a reporting gap, not an acceptance gate: the runtime does
+ *     not reject a round because an optional report field was not filled. An
+ *     empty files_changed is a legitimate no-change report, not a gap.
  *  2. Claims arm (v3.6): success=true but the runtime observed no machine
  *     evidence for it. The trigger is the runtime-derived providerStatus
  *     (verified / unavailable / absent) — "verified" requires an UNTAMPERED
@@ -485,17 +456,14 @@ function checkSuccessWithoutVerifiedEvidence(
   // remains the verification fact, and the warn still keeps success out of
   // the success trajectory (shouldPushSuccess keys on this check).
   const ev = selfEval.execution_report;
-  if (!ev || ((ev.files_changed ?? []).length === 0 && ev.tests_reported === null)) {
+  if (!ev) {
     return makeVerificationFlag({
       severity: "warn",
-      field: "success",
+      field: "outcome",
       check: CHECK_SUCCESS_WITHOUT_VERIFIED_EVIDENCE,
-      detail: ev
-        ? "Agent claims success but execution_report shows no files changed " +
-          "and no tests were run. This is a reporting gap, not machine evidence."
-        : "Agent claims success but provided no execution_report. The report is " +
-          "expected but missing; this is a reporting gap, not by itself a " +
-          "rejection. No machine evidence backs the claim.",
+      detail: "outcome=success but no execution_report was provided. The report " +
+        "is expected but missing; this is a reporting gap, not by itself a " +
+        "rejection. No machine evidence backs the claim.",
     });
   }
 
@@ -525,7 +493,7 @@ function checkSuccessWithoutVerifiedEvidence(
   const severity: VerificationFlag["severity"] = noChange ? "info" : "warn";
   return makeVerificationFlag({
     severity,
-    field: "success",
+    field: "outcome",
     check: CHECK_SUCCESS_WITHOUT_VERIFIED_EVIDENCE,
     detail: noChange
       ? "success with zero verified claims (no_change_reason declared)"
@@ -714,147 +682,6 @@ function checkRequiredCommandEvidence(
   return null;
 }
 
-// ── Test output parsing ────────────────────────────────────────────────────
-
-/** Whether a changed path looks like a test file. */
-function isTestFile(path: string): boolean {
-  return /\.(test|spec)\.[a-z0-9]+$/i.test(path) ||
-    /(^|[\\/])tests?[\\/]/i.test(path) ||
-    /_test\.[a-z0-9]+$/i.test(path);
-}
-
-interface ParsedTestCounts {
-  passed: number;
-  failed: number;
-  skipped: number;
-  total: number;
-}
-
-/** Best-effort parse of test counts from common test-runner output formats.
- *
- *  Scans the last 2000 characters of stdout (where summary lines typically
- *  appear) and tries patterns in descending specificity order. Returns null
- *  when the output format is unrecognized, stdout is empty, or a confident
- *  parse cannot be made.
- *
- *  Recognized formats: Jest verbose/compact, Mocha, pytest/unittest, Go test,
- *  and PHPUnit OK summaries. */
-export function parseTestOutput(stdout: string): ParsedTestCounts | null {
-  if (!stdout) return null;
-  const tail = stdout.length > 2000 ? stdout.slice(-2000) : stdout;
-  let match: RegExpMatchArray | null;
-
-  // 1. Jest verbose: "Tests: 1 failed, 8 passed, 9 total"
-  match = tail.match(/Tests:\s*(\d+)\s+failed,\s*(\d+)\s+passed,\s*(\d+)\s+total/i);
-  if (match) {
-    return { failed: Number(match[1]), passed: Number(match[2]), total: Number(match[3]), skipped: 0 };
-  }
-
-  // 2. Jest compact: "Tests: 8 passed, 9 total"
-  match = tail.match(/Tests:\s*(\d+)\s+passed,\s*(\d+)\s+total/i);
-  if (match) {
-    const passed = Number(match[1]);
-    const total = Number(match[2]);
-    return { passed, failed: total - passed, total, skipped: 0 };
-  }
-
-  // 3. Mocha: "8 passing" + optional "2 failing"
-  const mochaPass = tail.match(/(\d+)\s+passing/i);
-  if (mochaPass) {
-    const mochaFail = tail.match(/(\d+)\s+failing/i);
-    const passed = Number(mochaPass[1]);
-    const failed = mochaFail ? Number(mochaFail[1]) : 0;
-    return { passed, failed, total: passed + failed, skipped: 0 };
-  }
-
-  // 4. Go test: count "--- PASS:" and "--- FAIL:" lines
-  const goPassCount = (tail.match(/---\s+PASS:/g) || []).length;
-  const goFailCount = (tail.match(/---\s+FAIL:/g) || []).length;
-  if (goPassCount > 0 || goFailCount > 0) {
-    return { passed: goPassCount, failed: goFailCount, total: goPassCount + goFailCount, skipped: 0 };
-  }
-
-  // 5. pytest / unittest: "8 passed, 1 failed" or "8 passed"
-  match = tail.match(/(\d+)\s+passed[,;\s]+(\d+)\s+failed/i);
-  if (match) {
-    return { passed: Number(match[1]), failed: Number(match[2]), total: Number(match[1]) + Number(match[2]), skipped: 0 };
-  }
-  // pytest compact: "8 passed" (with a reasonable context hint)
-  match = tail.match(/(?:=\s+test session|\b(?:passed|failed)\b)/i);
-  if (match) {
-    const pCount = tail.match(/(\d+)\s+passed/i);
-    const fCount = tail.match(/(\d+)\s+failed/i);
-    if (pCount || fCount) {
-      const passed = pCount ? Number(pCount[1]) : 0;
-      const failed = fCount ? Number(fCount[1]) : 0;
-      return { passed, failed, total: passed + failed, skipped: 0 };
-    }
-  }
-
-  // 6. PHPUnit: "OK (8 tests, 16 assertions)"
-  match = tail.match(/OK\s*\((\d+)\s+tests?/i);
-  if (match) {
-    const total = Number(match[1]);
-    return { passed: total, failed: 0, total, skipped: 0 };
-  }
-
-  return null;
-}
-
-/** Cross-validate agent-reported tests_reported against command evidence output.
- *
- *  For each command provider whose status is "passed" and output is not
- *  truncated, attempts to parse test counts from stdout. Mismatched counts
- *  produce a warn-level flag; failures hidden by the agent (reported 0 failed
- *  when the command shows >0) produce an error-level flag.
- *
- *  Non-command evidence providers are skipped (no structural cross-check is
- *  defined for them yet). */
-function checkCommandEvidenceIntegrity(
-  selfEval: SelfEvaluation,
-  evidenceDeltas: ReadonlyArray<ObservationDelta>,
-): VerificationFlag | null {
-  const reported = selfEval.execution_report?.tests_reported;
-  if (!reported) return null;
-
-  for (const snapshot of afterObservations(evidenceDeltas)) {
-    if (snapshot.kind !== "command") continue;
-    if (snapshot.status !== "passed") continue;
-    if (snapshot.data.truncated === true) continue;
-
-    const stdout = typeof snapshot.data.stdoutExcerpt === "string" ? snapshot.data.stdoutExcerpt : "";
-    const parsed = parseTestOutput(stdout);
-    if (!parsed) continue;
-
-    const mismatches: string[] = [];
-    if (parsed.passed !== reported.passed) {
-      mismatches.push(`passed: reported ${reported.passed}, command shows ${parsed.passed}`);
-    }
-    if (parsed.failed !== reported.failed) {
-      mismatches.push(`failed: reported ${reported.failed}, command shows ${parsed.failed}`);
-    }
-
-    if (mismatches.length === 0) {
-      // Counts match exactly — evidence supports the agent's claim.
-      continue;
-    }
-
-    const name = snapshot.data.commandId;
-    // Agent hides failures → error. Other mismatch → warn.
-    const severity = parsed.failed > 0 && reported.failed === 0 ? "error" : "warn";
-
-    return makeVerificationFlag({
-      severity,
-      field: "tests_reported",
-      check: CHECK_COMMAND_EVIDENCE_MISMATCH,
-      detail: `Agent tests_reported don't match "${name}" output: ${mismatches.join("; ")}`,
-      ref: name,
-    });
-  }
-
-  return null;
-}
-
 /** v3.3: Verification domain integrity — command entrypoints and test files
  *  changed in the same round the command ran. Entrypoint modification
  *  invalidates the machine observation (error: the runtime executed a script
@@ -995,8 +822,10 @@ function checkContractItemsUnverified(
   // cannot wash away an unverified completion claim.
   if (statuses.closure === "superseded") {
     const itemIds = new Set(statuses.items.map((item) => item.itemId));
-    const claimsMet = (currentReport?.contract_item_claims ?? []).some(
-      (claim) => claim.outcome === "met" && itemIds.has(claim.item_id),
+    const claimsMet = (currentReport?.claims ?? []).some(
+      (claim) =>
+        claim.id.startsWith("rci-") &&
+        claim.outcome === "met" && itemIds.has(claim.id),
     );
     if (!claimsMet) return null;
   }
@@ -1015,11 +844,13 @@ function checkContractItemsUnverified(
   });
 }
 
-/** A different contract proposed while the ACTIVE contract is still open. The
- *  walker ignores the premature proposal — this warn only makes the ignored
- *  state visible. Silent when the active contract is closed (all items
- *  verified, or outcome=blocked), when no proposal is submitted, or when the
- *  proposal is a restate (content equality, never id equality). */
+/** v4.0.6: A different contract proposed while the ACTIVE contract is still
+ *  open and the proposal does not explicitly `supersedes` it. This is an
+ *  ERROR: a different slice is never silently saved and ignored. Silent when
+ *  the active contract is closed (all items verified, or outcome=blocked),
+ *  when no proposal is submitted, or when the proposal is a restate (content
+ *  equality, never id equality). A legal redirect makes the closure
+ *  `superseded`, so it never reaches this check. */
 function checkContractPremature(
   activeContract: ActiveContractView | null,
   statuses: ContractItemStatusView,
@@ -1030,15 +861,77 @@ function checkContractPremature(
   if (declaresBlocked(selfEval)) return null; // closed
   const proposal = selfEval.round_contract;
   if (!proposal) return null;
+  if (proposal.supersedes?.contract_id === activeContract.id) return null; // explicit redirect
   if (sameContract(proposal, activeContract)) return null; // restate → continue
   return makeVerificationFlag({
-    severity: "warn",
+    severity: "error",
     field: "round_contract",
     check: CHECK_CONTRACT_PREMATURE,
     detail:
       "The ACTIVE Round Contract is still open (not every item verified, not blocked) " +
-      "while a different contract was proposed — the proposal is ignored until the " +
-      "active contract closes.",
+      "while a different contract was proposed without supersedes — to replace it, " +
+      "add round_contract.supersedes with the active contract id and different " +
+      "acceptance items; otherwise omit round_contract to continue.",
+  });
+}
+
+/** v4.0.6: contract coverage. With an after-capable command configured, a
+ *  continuing round must leave the next round with an active contract.
+ *  `blocked` rounds are exempt (they close the contract and stop). The rule is
+ *  the shared `deriveContractRequirement`, so the submission boundary and the
+ *  gate cannot disagree. */
+function checkContractRequired(
+  activeContract: ActiveContractView | null,
+  statuses: ContractItemStatusView,
+  selfEval: SelfEvaluation,
+  contractCapability: boolean,
+): VerificationFlag | null {
+  const requirement = deriveContractRequirement({
+    shouldContinue: selfEval.should_continue === true,
+    blocked: declaresBlocked(selfEval),
+    proposalPresent: selfEval.round_contract !== undefined,
+    activeContract,
+    closure: statuses.closure,
+    contractCapability,
+  });
+  if (!requirement.required) return null;
+  return makeVerificationFlag({
+    severity: "error",
+    field: "round_contract",
+    check: CHECK_CONTRACT_REQUIRED,
+    detail:
+      requirement.reason === "no_active_contract"
+        ? "A verification command is configured and this round continues, but no " +
+          "Round Contract is active for the next round and none was proposed. " +
+          "Submit round_contract with a work_item and at least one item bound to a " +
+          "configured after-capable command."
+        : "The active Round Contract closed this round and this round continues, " +
+          "but no successor round_contract was proposed. Submit the next slice's " +
+          "contract (a new work_item with acceptance items).",
+  });
+}
+
+/** v4.0.6: a successor for a closed contract must bring genuinely new
+ *  acceptance conditions. Re-stating the same items would re-activate the old
+ *  slice and re-verify it. Changing only work_item/scope is not a new slice. */
+function checkContractSuccessorUnchanged(
+  activeContract: ActiveContractView | null,
+  statuses: ContractItemStatusView,
+  selfEval: SelfEvaluation,
+): VerificationFlag | null {
+  if (!activeContract) return null;
+  if (statuses.closure === "open") return null;
+  const proposal = selfEval.round_contract;
+  if (!proposal) return null;
+  if (acceptanceItemsDiffer(proposal, activeContract)) return null;
+  return makeVerificationFlag({
+    severity: "error",
+    field: "round_contract",
+    check: CHECK_CONTRACT_SUCCESSOR_UNCHANGED,
+    detail:
+      "The proposed successor repeats the closed contract's acceptance items " +
+      "verbatim. A successor must bring new acceptance conditions; changing only " +
+      "work_item or scope is not a new slice.",
   });
 }
 
@@ -1165,9 +1058,9 @@ export function verifySelfEvaluation(
       currentReport: selfEval.execution_report ?? null,
       currentDeltas: evidenceDeltas,
       currentBlocked: declaresBlocked(selfEval),
-      // v3.9.9: without this, debt/premature checks cannot see a superseded
-      // closure and would report the old contract as merely open.
-      currentTransition: selfEval.contract_transition ?? null,
+      // v3.9.9/v4.0.6: without this, debt/premature checks cannot see a
+      // superseded closure and would report the old contract as merely open.
+      currentRedirect: selfEval.round_contract?.supersedes ?? null,
     },
     commands: getPolicy().evidence.commands ?? [],
   });
@@ -1199,8 +1092,6 @@ export function verifySelfEvaluation(
     () => checkSuccessWithoutVerifiedEvidence(selfEval, evidenceStatus),
     // v2.12/v4.0.3: per-claim machine verification
     () => checkUnverifiedCriteriaClaims(selfEval, machineVerified),
-    // Declared outcome vs the required core success flag.
-    () => checkOutcomeConsistency(selfEval),
     // v2.12: retroactive claims against prior rounds
     () => checkRetroactiveClaims(selfEval, vaultEntries, currentRound),
     () => checkDuplicateConstraintDiscovery(selfEval, prevSelfEval, olderViolations),
@@ -1209,8 +1100,6 @@ export function verifySelfEvaluation(
     // v1.18: Cross-validate agent-reported files_changed against git evidence
     () => checkEvidenceIntegrity(selfEval, evidenceDeltas, filesReportedForGate),
     () => checkRequiredCommandEvidence(selfEval, evidenceDeltas),
-    // v2.0: Cross-validate agent-reported tests_reported against command output
-    () => checkCommandEvidenceIntegrity(selfEval, evidenceDeltas),
     // v3.3: Verification domain integrity — command entrypoint / test files
     // changed in the same round the command ran
     () => checkVerificationDomainIntegrity(evidenceDeltas, entrypointDrift),
@@ -1224,6 +1113,14 @@ export function verifySelfEvaluation(
     () => checkContractItemsUnverified(
       contractStatuses, selfEval.execution_report ?? null),
     () => checkContractPremature(activeContract, contractStatuses, selfEval),
+    () => checkContractRequired(
+      activeContract,
+      contractStatuses,
+      selfEval,
+      deriveConfiguredCapability(getPolicy()).contractVerificationAvailable,
+    ),
+    () => checkContractSuccessorUnchanged(
+      activeContract, contractStatuses, selfEval),
     // v3.7.1: opt-in gate-layer blocking (skipped when disabled)
     () => checkUserGateUnresolved(selfEval, gateEntries),
   ];

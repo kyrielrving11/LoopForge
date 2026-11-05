@@ -12,10 +12,13 @@ shapes, real ids, and usable commands.
 - **State transitions:** `emerged_subtasks`, `subgoal_updates`,
   `retracted_constraints` (Agent-discovered constraints only; operator
   criteria/hard constraints are immutable).
-- **Claims and verification proposals:** criterion claims, active contract item
-  claims, and `round_contract`.
+- **Claims and verification proposals:** one `execution_report.claims` channel
+  (`cr-` criterion claims are advisory, `rci-` active-contract item claims are
+  strict) and `round_contract` (with optional `supersedes`).
 - **Lifecycle controls:** `subtask_boundary` / `subtask_boundary_label`,
-  `outcome`, `blocker`, `agent_stop_reason`, `no_change_reason`, and `gate_ids`.
+  `outcome`, `blocker`, `objective_refinement`, `no_change_reason`, and
+  `gate_ids`. `outcome` is the ONE round conclusion; `success` must stop,
+  `blocked` must stop and carry a non-empty `blocker`.
 
 A field is included only when its event actually happened. The live guidance
 decides current applicability and the exact legal shape.
@@ -57,8 +60,9 @@ Use the current `submission_guidance` for the exact legal shape. Conceptually:
 - `scope` is an optional, report-only declaration of intended files or
   directories. It grants no permission, is never containment-checked, and
   changes outside it are an info fact only.
-- `criterion_refs` must cite real `cr-*` ids from the active criterion set the
-  current prompt rendered.
+- `criterion_refs` is optional and must cite real `cr-*` ids from the active
+  criterion set the current prompt rendered. `scope` and `supersedes` are
+  report-only modifiers and never change `rc-*` identity.
 - Sub-goals remain an Agent plan report. Contract items do not link to them;
   their closure depends only on the item, its bound commands and machine
   evidence.
@@ -68,46 +72,52 @@ normalized items, unconfigured/disabled/not-after commands, and a missing
 `work_item` are `contract_invalid`. Correct the payload and resubmit with the
 same `submissionHandle`.
 
-Contract and item ids are content-addressed (`rc-*`, `rci-*`). Restating an
-unchanged proposal preserves identity. While a contract is open, omitting
-`round_contract` continues it; you do not need to restate it.
+Contract and item ids are content-addressed (`rc-*`, `rci-*`) from `work_item`
+and the acceptance items only. Restating an unchanged proposal preserves
+identity; changing only `scope` or adding `supersedes` does not change it. While
+a contract is open, omitting `round_contract` continues it; you do not need to
+restate it.
 
-A different proposal while the active contract is open is ignored as
-`contract_premature`, unless it is part of a valid `contract_transition`.
+With an after-capable command, a continuing round MUST leave an active contract
+for the next round. A closed contract with no successor is `contract_required`;
+a successor that repeats the closed acceptance items is
+`contract_successor_unchanged`. A different proposal while the active contract
+is open is rejected as `contract_premature` unless it explicitly supersedes the
+active contract.
 
 ## Redirecting an active contract
 
 If investigation shows the active slice is the wrong route, do not report it as
-blocked and do not quietly propose another contract. Submit an explicit
-redirection in the same evaluation:
+blocked and do not quietly propose another contract. Put the redirect modifier
+on the ONE contract channel in the same evaluation:
 
 ```json
 {
-  "contract_transition": {
-    "kind": "supersede",
-    "contract_id": "<the active rc-XXXXXXXX id rendered in this prompt>",
-    "reason": "why the active slice is no longer the right route"
-  },
   "round_contract": {
     "work_item": "<the successor deliverable>",
     "items": [{
       "description": "<a different acceptance condition>",
       "criterion_refs": [],
       "verify_with": ["verify"]
-    }]
+    }],
+    "supersedes": {
+      "contract_id": "<the active rc-XXXXXXXX id rendered in this prompt>",
+      "reason": "why the active slice is no longer the right route"
+    }
   }
 }
 ```
 
-The successor is required, its acceptance items must differ from the active
-contract's, and `should_continue` must stay true. The old contract closes as
+The successor is the same proposal, its acceptance items must differ from the
+active contract's, and `should_continue` must stay true. The old contract closes as
 `superseded` — not `verified`, not `blocked` — its item statuses stay in the
 audit record, the workspace is not restored, and the redirect round cannot be
 reported as `completed`. The successor activates next round.
 
-A stale or mismatched `contract_id`, a missing successor, unchanged items, a
-blocked outcome, or `should_continue=false` returns `contract_invalid`; fix the
-payload and resubmit the same handle.
+A stale or mismatched `contract_id`, unchanged acceptance items, a blocked
+outcome, or `should_continue=false` returns `contract_invalid`; fix the payload
+and resubmit the same handle. Stop and blocked rounds cannot leave any
+proposal (`contract_on_stop`).
 
 ## Item status and closure
 
@@ -124,7 +134,7 @@ Closure priority is `blocked > superseded > verified > open`:
 
 - every item `verified` closes the contract as verified;
 - a round reporting `outcome: "blocked"` closes it as blocked;
-- an explicit `contract_transition` closes it as superseded;
+- an explicit `round_contract.supersedes` closes it as superseded;
 - otherwise it remains open.
 
 A superseded contract keeps every item status for audit and never restores the

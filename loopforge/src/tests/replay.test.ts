@@ -78,7 +78,7 @@ describe("ReplayBackend", () => {
   it("returns the committed prompt artifact and result", () => {
     appendRound(store, 1, {
       promptArtifact: artifact(1, "l2", "## Compiled Prompt"),
-      success: true,
+      outcome: "success",
     });
     const view = replay.getRound("test", 1);
     assert.equal(view?.promptArtifact?.renderedPrompt, "## Compiled Prompt");
@@ -123,8 +123,11 @@ describe("ReplayBackend", () => {
     appendRound(store, 1, {
       beforeEvidence: [git("before", "aaa")],
       roundEvidence: [git("after", "bbb")],
+      contract: {
+        work_item: "Slice B",
+        items: [{ description: "B is done", verify_with: ["verify"] }],
+      },
       contractTransition: {
-        kind: "supersede",
         contract_id: "rc-12345678",
         reason: "route changed",
       },
@@ -144,8 +147,7 @@ describe("ReplayBackend", () => {
       complete: true,
     }]);
     assert.deepEqual(row?.contract_redirect, {
-      kind: "supersede",
-      contract_id: "rc-12345678",
+            contract_id: "rc-12345678",
       reason: "route changed",
     });
   });
@@ -159,6 +161,15 @@ describe("ReplayBackend", () => {
     assert.equal(timeline[1]?.recompile_level, "l1");
     assert.equal(timeline[1]?.task, "Round 3");
     assert.equal(timeline[1]?.goal_id, "test:round-3");
+  });
+
+  it("v4.0.6: exposes the committed objective refinement", () => {
+    appendRound(store, 1, {
+      objectiveRefinement: "Deliver the portal with migration tooling",
+    });
+    const [row] = replay.timeline("test");
+    assert.equal(row?.objective_refinement,
+      "Deliver the portal with migration tooling");
   });
 
   it("v4.0.1: reads the vault once per timeline and never per round", () => {
@@ -251,16 +262,17 @@ describe("v4.0.2 — bounded replay window", () => {
         contextReason: "enforcement_retry",
       },
       attempt: 2,
-      success: false,
       outcome: "partial",
-      agentStopReason: "blocked",
       outputSummary: "bounded report",
       wrongAssumptions: ["old belief"],
       retractedConstraints: ["old rule"],
       openQuestions: ["still open?"],
       blocker: "needs input",
+      contract: {
+        work_item: "Slice B",
+        items: [{ description: "B is done", verify_with: ["verify"] }],
+      },
       contractTransition: {
-        kind: "supersede",
         contract_id: "rc-12345678",
         reason: "route changed",
       },
@@ -269,7 +281,6 @@ describe("v4.0.2 — bounded replay window", () => {
     assert.equal(row?.context_mode, "same_round_retry");
     assert.equal(row?.context_reason, "enforcement_retry");
     assert.equal(row?.loop_stop_reason, null);
-    assert.equal(row?.agent_stop_reason, "blocked");
     assert.ok(!("machine_backed_success" in (row ?? {})),
       "machineBackedSuccess lives only in the posture");
     assert.equal(row?.attempt, 2);
@@ -298,8 +309,7 @@ describe("v4.0.2 — bounded replay window", () => {
     assert.deepEqual(row?.open_questions, ["still open?"]);
     assert.equal(row?.blocker, "needs input");
     assert.deepEqual(row?.contract_redirect, {
-      kind: "supersede",
-      contract_id: "rc-12345678",
+            contract_id: "rc-12345678",
       reason: "route changed",
     });
   });

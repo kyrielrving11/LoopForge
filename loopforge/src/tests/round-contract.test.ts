@@ -15,7 +15,7 @@ import type {
   RoundOutcome,
 } from "../protocol.js";
 import type { CommandEvidencePolicy } from "../policy.js";
-import { deltasFrom } from "./_helpers.js";
+import { deltasFrom, itemClaims } from "./_helpers.js";
 
 const COMMAND: CommandEvidencePolicy = {
   name: "run-tests",
@@ -117,7 +117,7 @@ function round(
     promptArtifact: null,
     evaluation: null,
     executionReport: opts.claims
-      ? { contract_item_claims: opts.claims }
+      ? { claims: itemClaims(opts.claims) }
       : null,
     verificationFlags: [],
     result: null,
@@ -125,7 +125,7 @@ function round(
     agentSuccessClaim: false,
     agentOutcome: opts.outcome ?? null,
     contractProposal: contract ?? null,
-    contractTransition: null,
+    contractRedirect: null,
     contractBinding: contract ? bindingFor(contract, loopId) : null,
     beforeEvidence: [],
     afterEvidence: opts.observations ?? [],
@@ -147,11 +147,37 @@ describe("v3.8 — contract identity", () => {
     );
   });
 
-  it("keeps item ids stable when unrelated proposal fields change", () => {
+  it("v4.0.6: scope and supersedes are report-only and keep rc-/rci- identity", () => {
     const base = proposal();
-    const edited = proposal({ work_item: "Renamed", scope: ["src/auth", "src/db"] });
-    assert.deepEqual(deriveContractItemIds(base.items), deriveContractItemIds(edited.items));
-    assert.notEqual(deriveContractId("cc", base), deriveContractId("cc", edited));
+    const scopeOnly = proposal({ scope: ["src/auth", "src/db"] });
+    assert.equal(deriveContractId("cc", base), deriveContractId("cc", scopeOnly),
+      "a scope-only change is the same contract");
+    assert.deepEqual(deriveContractItemIds(base.items),
+      deriveContractItemIds(scopeOnly.items));
+    const withRedirect = {
+      ...base,
+      supersedes: { contract_id: "rc-12345678" },
+    };
+    assert.equal(deriveContractId("cc", base), deriveContractId("cc", withRedirect),
+      "adding a redirect modifier does not change the contract id");
+    assert.equal(sameContract(base, scopeOnly), true);
+    assert.equal(sameContract(base, withRedirect), true);
+  });
+
+  it("v4.0.6: work_item and acceptance items do change rc- identity", () => {
+    const base = proposal();
+    const renamed = proposal({ work_item: "Renamed" });
+    assert.notEqual(deriveContractId("cc", base), deriveContractId("cc", renamed));
+    const editedItems = proposal({
+      items: [{
+        description: "changed acceptance",
+        criterion_refs: [],
+        verify_with: ["verify"],
+      }],
+    });
+    assert.notEqual(deriveContractId("cc", base), deriveContractId("cc", editedItems));
+    assert.notDeepEqual(deriveContractItemIds(base.items),
+      deriveContractItemIds(editedItems.items));
   });
 
   it("gives identical item text distinct ids through the duplicate ordinal", () => {

@@ -31,12 +31,24 @@ export interface PreviousRoundFacts {
     recoveryBoundary: boolean;
 }
 export declare function computeGoalTextHash(text: string): string;
-export declare function deriveGoalId(loopId: string, task: string, explicit?: string): string;
+/** v4.0.6: goal identity derives from the WORKING objective (the latest
+ *  committed objective_refinement, else Operator Acceptance). There is no
+ *  caller-supplied goal_id override. */
+export declare function deriveGoalId(loopId: string, task: string): string;
 export declare function getPreviousRound(loopId: string, round: number, context: Record<string, unknown> | null): PreviousRound | null;
-/** The operator objective from the immutable acceptance carried by a committed
- *  evaluation or rollback directive. Acceptance is byte-identical across
- *  copies (enforced by the history loader), so it does not need a round or
- *  branch window. */
+/** v4.0.6: THE working objective.
+ *
+ *  - The immutable operator surface is the committed `OperatorAcceptance`.
+ *    Acceptance is byte-identical across copies (enforced by the history
+ *    loader), so it does not need a round or branch window.
+ *  - The objective TEXT is the latest committed `objective_refinement` on the
+ *    CURRENT BRANCH, else the acceptance task. A refinement from a branch
+ *    that was rolled back never applies.
+ *  - Success criteria and hard constraints ALWAYS come from the acceptance; a
+ *    refinement can never rewrite them.
+ *
+ *  Read-only callers that only need criteria/hard constraints read those
+ *  fields; they must not treat `objective` as the operator acceptance text. */
 export declare function latestObjective(loopId: string, context: Record<string, unknown> | null): LoopObjective | null;
 /** v3.8.1: THE recurring-fact derivation — one walk over the committed
  *  history, grouping repeated machine facts by what they are ABOUT.
@@ -56,9 +68,9 @@ export declare function latestObjective(loopId: string, context: Record<string, 
 export declare function deriveRecurringFlags(committedRounds: ReadonlyArray<CommittedRoundView>): RecurringFlag[];
 /** v3.2: Derive per-criterion status — the "goal → criteria → evidence"
  *  vertical view. Each objective criterion gets claimed/remaining/unknown
- *  (from per-round criterion_claims, ID-first or normalized-exact matching)
- *  and the round it was first reported met. Zero persistence — re-derived
- *  from committed rounds every compile.
+ *  (from the `cr-` entries of per-round execution_report.claims, ID-first or
+ *  normalized-exact matching) and the round it was first reported met. Zero
+ *  persistence — re-derived from committed rounds every compile.
  *
  *  v3.9.6: the derivation lives in `criterion-status.ts` so the submission
  *  boundary and guidance can read the same rows without importing this module
@@ -78,7 +90,7 @@ criterionFacts?: ReadonlyArray<CriterionMachineFact>): CriterionStatus[];
  *  gone, so a paraphrase is a different criterion). */
 export declare function criteriaMatch(a: string, b: string): boolean;
 export { deriveConstraintId, deriveCriterionId, isCriterionId, } from "./token-utils.js";
-export declare function decideLevel(request: LoopCompileRequest, context: Record<string, unknown> | null): "l0" | "l1" | "l2";
+export declare function decideLevel(request: LoopCompileRequest, context: Record<string, unknown> | null, workingObjective?: string | null): "l0" | "l1" | "l2";
 /** The prompt's evaluation block. All content (examples, contract/sub-goal
  *  guidance, flag-specific hints) comes from the one FIELD_GUIDES table in
  *  submission-guidance.ts; this function owns no second copy. */

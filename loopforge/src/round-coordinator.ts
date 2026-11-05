@@ -29,9 +29,10 @@ import type { MachineObservation } from "./protocol.js";
 import type { ObservationDelta } from "./evidence-provider.js";
 import type {
   CheckpointRef,
-  ContractTransition,
+  ContractSupersede,
   EnforcementResult,
   EvidencePosture,
+  RoundOutcome,
   SelfEvaluation,
   StopReason,
   VerificationFlag,
@@ -139,11 +140,12 @@ export interface RoundProcessResult {
   enforcementAction?: "accept" | "reject" | "terminate" | "backtrack" | "recovery";
   /** Enforcement reason (set when rejected or terminated). */
   enforcementReason?: string;
-  /** v4.0.3: the Agent's success claim (`selfEval.success`). This is a claim,
-   *  never a machine verdict. */
+  /** v4.0.3/v4.0.6: the Agent's success claim — a derived projection of
+   *  `outcome === "success"`, never a machine verdict and never an input
+   *  field. */
   agentSuccessClaim: boolean;
-  /** v4.0.3: the effective Agent-declared outcome. */
-  agentOutcome: import("./protocol.js").RoundOutcome | null;
+  /** v4.0.6: the Agent-declared outcome; null only for a rollback directive. */
+  agentOutcome: RoundOutcome | null;
   /** Whether the verification gate returned "contradicted". */
   gateContradicted: boolean;
   /** v4.0.3: the ONE evidence posture, derived once per round and persisted
@@ -218,9 +220,9 @@ export function finalizeStopReason(
   reason: StopReason | undefined,
   selfEval: SelfEvaluation,
   contractStatuses?: ContractItemStatusView | null,
-  /** v3.9.9: the current round's transition. A committed redirect can never
-   *  produce `completed` even if the old items were all verified. */
-  transition?: ContractTransition | null,
+  /** v3.9.9/v4.0.6: the current round's redirect. A committed redirect can
+   *  never produce `completed` even if the old items were all verified. */
+  redirect?: ContractSupersede | null,
 ): { reason: StopReason | undefined; flags: VerificationFlag[] } {
   if (reason !== "completed") return { reason, flags: [] };
   const declared = declaresBlocked(selfEval);
@@ -242,13 +244,13 @@ export function finalizeStopReason(
     };
   }
   const superseded = contractStatuses?.closure === "superseded" ||
-    Boolean(transition);
+    Boolean(redirect);
   if (superseded) {
     return {
       reason: "incomplete",
       flags: [{
         severity: "warn",
-        field: "contract_transition",
+        field: "round_contract.supersedes",
         check: "completion_truth_downgraded",
         detail:
           "The round superseded its active contract, so the old slice is not " +
@@ -289,7 +291,7 @@ export class RoundCoordinator {
       evidenceDeltas,
     } = input;
 
-    const agentSuccessClaim = selfEval.success ?? false;
+    const agentSuccessClaim = effectiveSuccess(selfEval);
     const agentOutcome = effectiveOutcome(selfEval);
 
     // ── 1. Load committed history once ──────────────────────────────────
@@ -324,7 +326,7 @@ export class RoundCoordinator {
         currentReport: selfEval.execution_report ?? null,
         currentDeltas: evidenceDeltas ?? [],
         currentBlocked: declaresBlocked(selfEval),
-        currentTransition: selfEval.contract_transition ?? null,
+        currentRedirect: selfEval.round_contract?.supersedes ?? null,
       },
       commands,
     });
@@ -622,22 +624,22 @@ export class RoundCoordinator {
       // the declaration arm below already owns that posture.
       const contractClosed = activeContractStatuses.contractId === "" ||
         activeContractStatuses.closure === "verified";
-      // The agent's explicit declaration of a blocked stop outranks the
-      // success claim. It is checked FIRST so `success: true` + a declared
-      // `outcome`/`agent_stop_reason` of blocked can never be reported as
-      // `completed` — the two fields contradict, and the honest reading is the
-      // declared one. A contradicted item also never reaches `completed`
-      // (closure is `verified` only when EVERY item is), so the
-      // contradicted-and-stopping posture lands on `incomplete` at worst; the
-      // reject/terminate path for it is the enforcement gate's, evaluated
-      // before this point.
+      // v4.0.6: the stop mapping reads ONE outcome field.
+      //   blocked                      → blocked
+      //   success + contract closed    → completed
+      //   success + open contract      → incomplete
+      //   partial                      → incomplete
+      //   failed                       → failed
+      // A contradicted item also never reaches `completed` (closure is
+      // `verified` only when EVERY item is); the reject/terminate path for it
+      // is the enforcement gate's, evaluated before this point.
       const declaredBlocked = declaresBlocked(selfEval);
       let reason: StopReason;
       if (declaredBlocked) {
         reason = "blocked";
-      } else if (effectiveSuccess(selfEval) && contractClosed) {
+      } else if (agentOutcome === "success" && contractClosed) {
         reason = "completed";
-      } else if (effectiveSuccess(selfEval)) {
+      } else if (agentOutcome === "success" || agentOutcome === "partial") {
         reason = "incomplete";
       } else {
         reason = "failed";
@@ -650,7 +652,7 @@ export class RoundCoordinator {
         reason,
         selfEval,
         activeContractStatuses,
-        selfEval.contract_transition ?? null,
+        selfEval.round_contract?.supersedes ?? null,
       );
       return evaluationResult({
         action: "stop",

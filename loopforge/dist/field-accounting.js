@@ -20,7 +20,6 @@ const ROUND_CONTRACT_WHOLE_DROP_CODES = new Set([
     "invalid_entry",
     DIAG_ALL_ENTRIES_DROPPED,
 ]);
-const TESTS_WHOLE_DROP_CODES = new Set(["invalid_value", "invalid_entry"]);
 function isObject(value) {
     return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -38,9 +37,6 @@ function wholeDrop(path, diagnostics) {
     const exact = diagnostics.filter((diagnostic) => diagnostic.path === path && diagnostic.handling === "dropped");
     if (exact.length === 0)
         return false;
-    if (path === "execution_report.tests_reported") {
-        return exact.some((diagnostic) => TESTS_WHOLE_DROP_CODES.has(diagnostic.code));
-    }
     if (path === "round_contract") {
         return exact.some((diagnostic) => ROUND_CONTRACT_WHOLE_DROP_CODES.has(diagnostic.code));
     }
@@ -68,8 +64,6 @@ function hasValue(path, value) {
     return value !== undefined && value !== null;
 }
 function positiveValue(path, value) {
-    if (path === "execution_report.tests_reported")
-        return isObject(value);
     if (path === "round_contract") {
         return isObject(value) && Array.isArray(value.items) && value.items.length > 0;
     }
@@ -98,9 +92,7 @@ export function deriveFieldAccounting(source) {
         const dropped = wholeDrop(path, source.normalizationDiagnostics);
         const kept = truncated
             ? positiveValue(path, value) && !dropped
-            : path === "execution_report.tests_reported"
-                ? source.evaluation.execution_report !== undefined && !dropped
-                : hasValue(path, value) && !dropped;
+            : hasValue(path, value) && !dropped;
         if (kept) {
             retained.push(path);
         }

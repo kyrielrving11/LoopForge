@@ -153,7 +153,7 @@ function findingEntries(flags) {
 function contractEntry(activeContract, statuses) {
     if (!statuses.contractId)
         return { contract: null, omitted: 0 };
-    const criterionRefsById = new Map((activeContract?.items ?? []).map((item) => [item.id, [...item.criterion_refs]]));
+    const criterionRefsById = new Map((activeContract?.items ?? []).map((item) => [item.id, [...(item.criterion_refs ?? [])]]));
     const items = statuses.items
         .map((item) => ({
         id: item.itemId,

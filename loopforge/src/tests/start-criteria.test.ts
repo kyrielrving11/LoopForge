@@ -102,14 +102,13 @@ describe("v3.9.4 — initial criteria become the objective's anchors", () => {
         sessionId,
         roundId,
         evaluation: {
-          success: true,
+          outcome: "success",
           output_summary: "Claimed success with the criterion still open.",
           constraint_violations: [],
-          should_continue: true,
+          should_continue: false,
           execution_report: {
             files_changed: [],
-            tests_reported: { passed: 0, failed: 0, skipped: 0 },
-            criterion_claims: [{ criterion_id: AUTH_ID, outcome: "remaining" }],
+            claims: [{ id: AUTH_ID, outcome: "remaining" }],
           },
         },
       });

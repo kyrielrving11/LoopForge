@@ -11,13 +11,9 @@
 
 export const VERIFICATION_ACTIONS: Readonly<Record<string, string>> = {
   success_with_remaining_criteria:
-    "Complete the remaining criteria before claiming success, or set success=false and report what remains.",
+    "Complete the remaining criteria before declaring outcome=success, or declare partial/failed and report what remains.",
   success_without_verified_evidence:
     "Back the success claim with machine-observable evidence (a passed after-phase command). no_change_reason is honored only when no enabled verification command is configured.",
-  outcome_success_contradiction:
-    "Reconcile the declared outcome with the success flag and resubmit an honest evaluation.",
-  blocked_without_blocker:
-    "State the concrete blocker, or drop the blocked outcome.",
   retroactive_claim_bad_round:
     "Correct the referenced round number, or withdraw the retroactive claim.",
   retroactive_claim_unverified:
@@ -35,8 +31,6 @@ export const VERIFICATION_ACTIONS: Readonly<Record<string, string>> = {
     "Report only the net boundary change: add every machine-observed path you omitted, remove every path the machine did not observe, and include deletions.",
   required_command_failed:
     "Re-run the required verification command and report its actual output before claiming success.",
-  command_evidence_mismatch:
-    "Report the true command output and reconcile the mismatch.",
   criteria_claims_unverified:
     "Provide evidence for each claimed success criterion.",
   // v3.3 — Round Contract checks (and the three v3.3 checks that predated
@@ -46,12 +40,17 @@ export const VERIFICATION_ACTIONS: Readonly<Record<string, string>> = {
   test_files_modified:
     "Re-run the verification command after the test-file changes and report the fresh output.",
   round_scope_drift:
-    "Report only — drift does not block the round. If the active slice is no longer the right route, use contract_transition with the successor contract; otherwise treat this as an audit signal and continue.",
+    "Report only — drift does not block the round. If the active slice is no longer the right route, add round_contract.supersedes with the successor contract; otherwise treat this as an audit signal and continue.",
   // v3.8 — item model: claimed-but-unverified debt
   contract_items_unverified:
     "Run the bound command(s) for each claimed item so they are observed passing, or report the item as remaining (or declare outcome=\"blocked\").",
   contract_premature:
-    "The ACTIVE contract is still open — restate it unchanged to continue it; a different contract is ignored until every item is verified or the round reports blocked.",
+    "The ACTIVE contract is still open — omit round_contract to continue it unchanged, or add round_contract.supersedes with the active rc- id and different acceptance items to replace the slice.",
+  // v4.0.6 — contract coverage
+  contract_required:
+    "With an after-capable verification command configured, a continuing round must leave an active contract for the next round. Submit round_contract with a work_item and at least one acceptance item bound to a configured command.",
+  contract_successor_unchanged:
+    "A closed contract's successor must bring NEW acceptance items; changing only work_item or scope re-verifies the old slice. Declare different items, or omit round_contract.",
   // v3.7.1 — opt-in gate layer: cited gates need an approved human decision
   user_gate_unresolved:
     "The round cites a high-risk action without an approved human decision. Run loopforge_gate_check, present the approval question, call loopforge_gate_resolve after the human decides, and resubmit with the approved gate id in evaluation.gate_ids.",

@@ -287,7 +287,8 @@ export function derivePolicyMetrics(
     metric.committedRounds++;
     if (result.action === "stop") metric.stoppedRounds++;
     if (result.action === "terminate") metric.terminatedRounds++;
-    if ((result.agentOutcome ?? (result.agentSuccessClaim ? "success" : "failed")) === "success") {
+    // v4.0.6: `agentOutcome` is always present on a committed evaluation.
+    if (result.agentOutcome === "success") {
       metric.agentClaimedSuccessRounds++;
     }
     if (result.gateContradicted === true) metric.gateContradictedRounds++;

@@ -325,13 +325,13 @@ describe("v3.9.7 — SessionManager checkpoint recovery E2E", () => {
       }),
     ];
     const evaluation = (file: string) => ({
-      success: false,
+      outcome: "failed",
       output_summary: `worked on ${file}`,
       constraint_violations: [],
       should_continue: true,
       execution_report: {
         files_changed: [file],
-        tests_reported: { passed: 0, failed: 0, skipped: 0 },
+
       },
     });
     try {

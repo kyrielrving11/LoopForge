@@ -19,7 +19,7 @@
  *  independent of `work_item`/`scope`, which stay slice-level labels. This is
  *  the opposite of a SubGoal, whose id includes its declaration round.
  */
-import type { ContractItemProposal, ContractTransition, ExecutionReport, RoundContractProposal } from "./protocol.js";
+import type { ContractItemProposal, ContractSupersede, ExecutionReport, RoundContractProposal } from "./protocol.js";
 import type { ObservationDelta } from "./evidence-provider.js";
 import type { CommittedRoundView } from "./committed-round.js";
 import type { CommandEvidencePolicy } from "./policy.js";
@@ -54,23 +54,29 @@ export declare function activateContract(proposal: RoundContractProposal, declar
  *  contract. Never compare by id (8 hex = 32 bits; a collision must not merge
  *  two different contracts). */
 export declare function sameContract(left: RoundContractProposal, right: RoundContractProposal): boolean;
-/** v3.9.9: the ONE current-round fact bundle for contract derivations. Every
- *  caller passes report/deltas/blocked/transition together, so a consumer can
- *  no longer forget `agent_stop_reason: "blocked"` or the transition while another
- *  consumer sees them. */
+/** v3.9.9 / v4.0.6: the ONE current-round fact bundle for contract
+ *  derivations. Every caller passes report/deltas/blocked/redirect together,
+ *  so a consumer can no longer forget the round's blocked declaration or its
+ *  explicit redirect while another consumer sees them. */
 export interface CurrentRoundFacts {
     report: ExecutionReport | null;
     deltas: ReadonlyArray<ObservationDelta>;
-    /** The round's ONE blocked declaration (outcome OR agent_stop_reason). */
+    /** The round's ONE blocked declaration (`outcome: "blocked"`). */
     blocked: boolean;
-    /** The round's explicit contract redirect, if it declared one. */
-    transition: ContractTransition | null;
+    /** The round's explicit contract redirect, if it declared one
+     *  (`round_contract.supersedes`). */
+    redirect: ContractSupersede | null;
 }
 export declare const NO_CURRENT_ROUND_FACTS: CurrentRoundFacts;
 /** Read a committed view's current-round facts. Read views (audit/explain/
  *  receipt/round-facts) use this instead of hand-building `outcome`-only
  *  blocked flags. */
 export declare function committedRoundFacts(view: CommittedRoundView): CurrentRoundFacts;
+/** v4.0.6: The successor's acceptance CONTENT must actually change. A new
+ *  work_item or scope label alone is not a new slice. Exported because the
+ *  verification gate's `contract_successor_unchanged` check uses the SAME
+ *  content identity. */
+export declare function acceptanceItemsDiffer(proposal: RoundContractProposal, active: ActiveContractView): boolean;
 /** v3.8: The active contract after replaying committed rounds in order. */
 export declare function deriveActiveRoundContract(rounds: ReadonlyArray<CommittedRoundView>, commands?: ReadonlyArray<CommandEvidencePolicy>): ActiveContractView | null;
 /** v3.8: The contract a round EXECUTED under, plus every item's status as of

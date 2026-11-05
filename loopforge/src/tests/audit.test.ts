@@ -3,8 +3,7 @@ import {
   committedBacktrackRound,
   criterionClaims,
   fixtureEvidencePosture,
-  installTestCommandProvider,
-} from "./_helpers.js";
+  installTestCommandProvider, itemClaims } from "./_helpers.js";
 import { ROUND_TRANSACTION_SCHEMA_VERSION } from "../round-transaction.js";
 
 import { describe, it } from "node:test";
@@ -102,11 +101,13 @@ function committedFeedback(
           },
           evaluation,
           submittedFields: [
-            "success", "output_summary", "constraint_violations", "should_continue",
+            "outcome", "output_summary", "constraint_violations", "should_continue",
           ],
           result: {
             action,
             verificationFlags: flags,
+            agentSuccessClaim: evaluation.outcome === "success",
+            agentOutcome: evaluation.outcome ?? "failed",
             evidencePosture: fixtureEvidencePosture(round),
           },
           createdAt: Date.now(),
@@ -115,6 +116,8 @@ function committedFeedback(
         result: {
           action,
           verificationFlags: flags,
+          agentSuccessClaim: evaluation.outcome === "success",
+          agentOutcome: evaluation.outcome ?? "failed",
           evidencePosture: fixtureEvidencePosture(round),
         },
       },
@@ -167,8 +170,8 @@ describe("buildAudit", () => {
 
   it("aggregates rounds with outcomes and checks from committed snapshots", () => {
     const entries = [
-      committedFeedback(1, { success: true, output_summary: "r1", constraint_violations: [], should_continue: true }),
-      committedFeedback(2, { success: false, output_summary: "r2", constraint_violations: [], should_continue: true }, [
+      committedFeedback(1, { outcome: "success", output_summary: "r1", constraint_violations: [], should_continue: true }),
+      committedFeedback(2, { outcome: "failed", output_summary: "r2", constraint_violations: [], should_continue: true }, [
         { severity: "error", field: "success", check: "required_command_failed", detail: "npm test failed" },
       ]),
     ];
@@ -185,17 +188,35 @@ describe("buildAudit", () => {
       "boolean");
   });
 
+  it("v4.0.6: exposes the Agent's blocker and objective refinement", () => {
+    const entries = [
+      committedFeedback(1, {
+        outcome: "blocked",
+        output_summary: "blocked",
+        constraint_violations: [],
+        should_continue: false,
+        blocker: "needs the operator to choose the target database",
+        objective_refinement: "Deliver the portal with migration tooling",
+      }, [], "stop"),
+    ];
+    const audit = buildAudit("audit-loop", entries);
+    assert.equal(audit.rounds[0].blocker,
+      "needs the operator to choose the target database");
+    assert.equal(audit.rounds[0].objectiveRefinement,
+      "Deliver the portal with migration tooling");
+  });
+
   it("reports criteria as evidenced only when claims are machine-verified", () => {
     const entries = [
       committedFeedback(1, {
-        success: true,
+        outcome: "success",
         output_summary: "r1",
         constraint_violations: [],
         should_continue: false,
         execution_report: {
           files_changed: ["src/a.ts"],
-          tests_reported: { passed: 2, failed: 0, skipped: 0 },
-          criterion_claims: criterionClaims(["tests pass"], []),
+
+          claims: criterionClaims(["tests pass"], []),
         },
       }, [], "continue", [], ["tests pass"]),
     ];
@@ -211,15 +232,14 @@ describe("buildAudit", () => {
     const itemId = deriveContractItemIds(CONTRACT.items)[0];
     const entries = [
       committedFeedback(1, {
-        success: false, output_summary: "declared", constraint_violations: [], should_continue: true,
+        outcome: "failed", output_summary: "declared", constraint_violations: [], should_continue: true,
         round_contract: CONTRACT,
       }),
       committedFeedback(2, {
-        success: true, output_summary: "verified", constraint_violations: [], should_continue: true,
+        outcome: "success", output_summary: "verified", constraint_violations: [], should_continue: true,
         execution_report: {
           files_changed: [],
-          criterion_claims: [],
-          contract_item_claims: [{ item_id: itemId, outcome: "met" }],
+          claims: itemClaims([{ item_id: itemId, outcome: "met" }]),
         },
       }, [], "continue", [commandObservation("passed")]),
     ];
@@ -248,15 +268,14 @@ describe("buildAudit", () => {
     const itemId = deriveContractItemIds(CONTRACT.items)[0];
     const audit = buildAudit("audit-loop", [
       committedFeedback(1, {
-        success: false, output_summary: "declared", constraint_violations: [], should_continue: true,
+        outcome: "failed", output_summary: "declared", constraint_violations: [], should_continue: true,
         round_contract: CONTRACT,
       }),
       committedFeedback(2, {
-        success: true, output_summary: "claimed", constraint_violations: [], should_continue: true,
+        outcome: "success", output_summary: "claimed", constraint_violations: [], should_continue: true,
         execution_report: {
           files_changed: [],
-          criterion_claims: [],
-          contract_item_claims: [{ item_id: itemId, outcome: "met" }],
+          claims: itemClaims([{ item_id: itemId, outcome: "met" }]),
         },
       }),
     ]);
@@ -273,15 +292,14 @@ describe("buildAudit", () => {
     const itemId = deriveContractItemIds(CONTRACT.items)[0];
     const audit = buildAudit("audit-loop", [
       committedFeedback(1, {
-        success: false, output_summary: "declared", constraint_violations: [], should_continue: true,
+        outcome: "failed", output_summary: "declared", constraint_violations: [], should_continue: true,
         round_contract: CONTRACT,
       }),
       committedFeedback(2, {
-        success: true, output_summary: "claimed", constraint_violations: [], should_continue: false,
+        outcome: "success", output_summary: "claimed", constraint_violations: [], should_continue: false,
         execution_report: {
           files_changed: [],
-          criterion_claims: [],
-          contract_item_claims: [{ item_id: itemId, outcome: "met" }],
+          claims: itemClaims([{ item_id: itemId, outcome: "met" }]),
         },
       }, [], "continue", [commandObservation("failed")]),
     ]);
@@ -292,13 +310,13 @@ describe("buildAudit", () => {
 
   it("v3.8: declared and evidenced are comparable distinct-id counts", () => {
     const claim = (text: string) => ({
-      success: false,
+      outcome: "failed",
       output_summary: `r ${text}`,
       constraint_violations: [],
       should_continue: true,
       execution_report: {
         files_changed: ["src/a.ts"],
-        criterion_claims: criterionClaims([text]),
+        claims: criterionClaims([text]),
       },
     });
     const audit = buildAudit("audit-loop", [
@@ -337,7 +355,7 @@ describe("buildAudit", () => {
     try {
       const store = new FileLoopStore(dir);
       for (const round of [1, 2, 3]) {
-        store.appendEntry(committedFeedback(round, { success: true, output_summary: `r${round}`, constraint_violations: [], should_continue: true }));
+        store.appendEntry(committedFeedback(round, { outcome: "success", output_summary: `r${round}`, constraint_violations: [], should_continue: true }));
       }
       // Simulate a manual file deletion: round 2's document disappears.
       const hash = createHash("sha256").update("audit-loop").digest("hex");
@@ -353,7 +371,7 @@ describe("buildAudit", () => {
 
   it("is read-only: never mutates the entries array", () => {
     const entries = [
-      committedFeedback(1, { success: true, output_summary: "r1", constraint_violations: [], should_continue: true }),
+      committedFeedback(1, { outcome: "success", output_summary: "r1", constraint_violations: [], should_continue: true }),
       gateOpened("gate-abc", "Deploy to production"),
     ];
     const before = JSON.stringify(entries);
@@ -367,11 +385,11 @@ describe("buildAudit", () => {
     const entries = [
       committedFeedback(
         1,
-        { success: true, output_summary: "clean round", constraint_violations: [], should_continue: true },
+        { outcome: "success", output_summary: "clean round", constraint_violations: [], should_continue: true },
       ),
       committedFeedback(
         2,
-        { success: true, output_summary: "stalled work", constraint_violations: [], should_continue: true },
+        { outcome: "success", output_summary: "stalled work", constraint_violations: [], should_continue: true },
         [{ severity: "error", check: "success_with_remaining_criteria", field: "success", detail: "stalled" }],
       ),
       committedBacktrackRound(2, "audit-loop", 1),
@@ -391,7 +409,7 @@ describe("buildAudit", () => {
     // flag on the superseded record could still flip the verdict — an audit
     // verdict of `contradicted` for a record that is not committed history,
     // while explain (which reads only the window) reported the opposite.
-    const clean = { success: false, output_summary: "clean", constraint_violations: [], should_continue: true };
+    const clean = { outcome: "failed", output_summary: "clean", constraint_violations: [], should_continue: true };
     const entries = [
       committedFeedback(1, clean, [
         { severity: "error", check: "required_command_failed", field: "execution_report", detail: "superseded" },

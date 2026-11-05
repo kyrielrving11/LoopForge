@@ -7,7 +7,7 @@
 import type { MachineObservation } from "./protocol.js";
 import type { ObservationDelta } from "./evidence-provider.js";
 import type { VaultEntry } from "./loop-store.js";
-import type { CheckpointRef, CompiledRoundFacts, ContractBinding, ContractTransition, EvidencePosture, ExecutionReport, LoopRoundResult, OperatorAcceptance, PromptArtifact, RecoveryDirective, RoundContractProposal, RoundOutcome, SelfEvaluation, SubmissionDiagnostic, SubGoalUpdate, VerificationFlag } from "./protocol.js";
+import type { CheckpointRef, CompiledRoundFacts, ContractBinding, ContractSupersede, EvidencePosture, ExecutionReport, LoopRoundResult, OperatorAcceptance, PromptArtifact, RecoveryDirective, RoundContractProposal, RoundOutcome, SelfEvaluation, SubmissionDiagnostic, SubGoalUpdate, VerificationFlag } from "./protocol.js";
 import type { RoundProcessResult } from "./round-coordinator.js";
 import type { RoundTransactionSnapshot } from "./round-transaction.js";
 export type CommittedAction = "continue" | "stop" | "recovery" | "backtrack";
@@ -50,15 +50,21 @@ export interface CommittedRoundView {
      *  only on a hand-built/library view. */
     readonly evidencePosture: EvidencePosture | null;
     readonly action: CommittedAction;
-    /** v4.0.3: the Agent's success claim (never a machine verdict). */
+    /** v4.0.3/v4.0.6: the Agent's success claim — a derived projection of
+     *  `outcome === "success"`, never a machine verdict. */
     readonly agentSuccessClaim: boolean;
-    /** v4.0.3: the effective Agent-declared outcome. */
+    /** v4.0.6: the Agent-declared outcome. */
     readonly agentOutcome: RoundOutcome | null;
+    /** v4.0.6: the Agent's committed overall-objective refinement, if this
+     *  round carried one. The latest such value on the current branch is the
+     *  working objective text. */
+    readonly objectiveRefinement?: string;
     readonly contractProposal: RoundContractProposal | null;
-    /** v3.9.9: this round's explicit contract redirection, if it declared one.
-     *  Read from the committed evaluation; a target the reducer cannot match is
-     *  inert, never a reason to close a contract. */
-    readonly contractTransition: ContractTransition | null;
+    /** v4.0.6: this round's explicit contract redirection, DERIVED from the
+     *  committed proposal's optional `supersedes` (never a second persisted
+     *  field). A target the reducer cannot match is inert, never a reason to
+     *  close a contract. */
+    readonly contractRedirect: ContractSupersede | null;
     /** v3.8: the machine binding stamped when the declaring round committed. */
     readonly contractBinding: ContractBinding | null;
     readonly beforeEvidence: MachineObservation[];

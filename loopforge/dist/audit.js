@@ -60,16 +60,26 @@ export function buildAudit(loopId, entries, store) {
             round,
             agentSuccessClaim: view.agentSuccessClaim,
             agentOutcome: view.agentOutcome ?? "unknown",
+            blocker: view.evaluation?.blocker ?? null,
+            objectiveRefinement: view.objectiveRefinement ?? null,
+            contractRedirect: view.contractRedirect
+                ? {
+                    contract_id: view.contractRedirect.contract_id,
+                    ...(view.contractRedirect.reason !== undefined
+                        ? { reason: view.contractRedirect.reason }
+                        : {}),
+                }
+                : null,
             machineBackedSuccess: view.evidencePosture?.machineBackedSuccess ?? false,
             evidencePosture: view.evidencePosture,
-            claims: (view.executionReport?.criterion_claims ?? [])
-                .filter((claim) => claim.outcome === "met")
+            claims: (view.executionReport?.claims ?? [])
+                .filter((claim) => claim.id.startsWith("cr-") && claim.outcome === "met")
                 .map((claim) => {
-                const id = isCriterionId(claim.criterion_id)
-                    ? claim.criterion_id
-                    : deriveCriterionId(claim.criterion_id);
+                const id = isCriterionId(claim.id)
+                    ? claim.id
+                    : deriveCriterionId(claim.id);
                 return {
-                    text: claim.criterion_id,
+                    text: claim.id,
                     status: verifiedIds.has(id)
                         ? "verified"
                         : "unverified",

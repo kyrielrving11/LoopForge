@@ -55,28 +55,29 @@ function prepare(
 
 function continuingEvaluation(): SelfEvaluation {
   return {
-    success: false,
+    outcome: "failed",
     output_summary: "partial progress",
     constraint_violations: [],
     should_continue: true,
     execution_report: {
       files_changed: [],
-      tests_reported: null,
-      criterion_claims: criterionClaims([], ["remaining"]),
+
+      claims: criterionClaims([], ["remaining"]),
     },
   };
 }
 
 function rejectedEvaluation(): SelfEvaluation {
+  // success+stop with an unmet criterion reaches the enforcement gate, which
+  // rejects the round before the stop decision.
   return {
-    success: true,
+    outcome: "success",
     output_summary: "claimed completion",
     constraint_violations: [],
-    should_continue: true,
+    should_continue: false,
     execution_report: {
       files_changed: ["src/change.ts"],
-      tests_reported: { passed: 1, failed: 0, skipped: 0 },
-      criterion_claims: criterionClaims([], ["still open"]),
+      claims: criterionClaims([], ["still open"]),
     },
   };
 }
@@ -89,7 +90,7 @@ describe("schema 6 structural invariants", () => {
       afterEvidence: [],
       evaluation: continuingEvaluation(),
       submittedFields: [
-        "success", "output_summary", "constraint_violations", "should_continue",
+        "outcome", "output_summary", "constraint_violations", "should_continue",
       ],
       result: {
         action: "continue",
@@ -278,13 +279,13 @@ describe("backtrack commit replay", () => {
       phase: "committed",
       afterEvidence: [],
       evaluation: {
-        success: false,
+        outcome: "failed",
         output_summary: "stalled",
         constraint_violations: [],
         should_continue: true,
       },
       submittedFields: [
-        "success", "output_summary", "constraint_violations", "should_continue",
+        "outcome", "output_summary", "constraint_violations", "should_continue",
       ],
       result: {
         action: "backtrack",
@@ -321,7 +322,7 @@ describe("backtrack commit replay", () => {
       afterEvidence: [],
       evaluation: continuingEvaluation(),
       submittedFields: [
-        "success", "output_summary", "constraint_violations", "should_continue",
+        "outcome", "output_summary", "constraint_violations", "should_continue",
       ],
       result: {
         action: "backtrack",

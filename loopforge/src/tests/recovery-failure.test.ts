@@ -36,13 +36,13 @@ function git(dir: string, ...args: string[]): void {
 
 function flatEvaluation() {
   return {
-    success: false,
+    outcome: "failed",
     output_summary: "no change",
     constraint_violations: [],
     should_continue: true,
     execution_report: {
       files_changed: [] as string[],
-      tests_reported: { passed: 0, failed: 0, skipped: 0 },
+
     },
   };
 }

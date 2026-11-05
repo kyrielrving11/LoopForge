@@ -45,6 +45,7 @@ function declaredEvolution(previous) {
         (previous.subgoalUpdates?.length ?? 0) > 0 ||
         (previous.retractedConstraints?.length ?? 0) > 0 ||
         previous.contractProposal !== null ||
+        typeof previous.objectiveRefinement === "string" ||
         evaluation?.subtask_boundary === true);
 }
 function machineActivity(previous) {

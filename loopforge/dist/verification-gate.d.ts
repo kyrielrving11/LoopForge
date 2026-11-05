@@ -26,8 +26,6 @@ import { type ActiveContractView } from "./round-contract.js";
 import { type RoundFacts } from "./round-facts.js";
 export declare const CHECK_SUCCESS_WITH_REMAINING_CRITERIA = "success_with_remaining_criteria";
 export declare const CHECK_SUCCESS_WITHOUT_VERIFIED_EVIDENCE = "success_without_verified_evidence";
-export declare const CHECK_OUTCOME_SUCCESS_CONTRADICTION = "outcome_success_contradiction";
-export declare const CHECK_BLOCKED_WITHOUT_BLOCKER = "blocked_without_blocker";
 export declare const CHECK_RETROACTIVE_CLAIM_BAD_ROUND = "retroactive_claim_bad_round";
 export declare const CHECK_RETROACTIVE_CLAIM_UNVERIFIED = "retroactive_claim_unverified";
 export declare const CHECK_DUPLICATE_CONSTRAINT_DISCOVERY = "duplicate_constraint_discovery";
@@ -35,7 +33,6 @@ export declare const CHECK_RECURRING_VIOLATION = "recurring_violation";
 export declare const CHECK_RETRACT_FRESH_CONSTRAINT = "retract_fresh_constraint";
 export declare const CHECK_EVIDENCE_INTEGRITY = "evidence_integrity";
 export declare const CHECK_REQUIRED_COMMAND_FAILED = "required_command_failed";
-export declare const CHECK_COMMAND_EVIDENCE_MISMATCH = "command_evidence_mismatch";
 /** v3.3: Verification domain integrity — a command entrypoint (run-tests.sh,
  *  package.json, …) changed in the same round the command ran. The runtime
  *  executed a script the agent just rewrote, so the observation has no
@@ -54,11 +51,19 @@ export declare const CHECK_CONTRACT_ITEMS_UNVERIFIED = "contract_items_unverifie
  *  contract's declared scope. Warn; v3.8: not waivable by explanation — the
  *  enforcement gate rejects, and repeated drift terminates. */
 export declare const CHECK_ROUND_SCOPE_DRIFT = "round_scope_drift";
-/** v3.5: The ACTIVE contract is still open (not completed, not blocked)
- *  while a different contract was proposed — the proposal is ignored until
- *  the active one closes. Warn: the walker still ignores it; this only
- *  surfaces the otherwise-silent state. */
+/** v3.5/v4.0.6: The ACTIVE contract is still open (not completed, not
+ *  blocked) while a different contract was proposed WITHOUT `supersedes`.
+ *  Error: a different slice is never silently saved and ignored. To replace
+ *  the active slice, add `round_contract.supersedes` naming it. */
 export declare const CHECK_CONTRACT_PREMATURE = "contract_premature";
+/** v4.0.6: A continuing round with contract capability would leave the next
+ *  round without an active contract. Error: with after-capable commands, a
+ *  continuing round must leave a contract for the next round. */
+export declare const CHECK_CONTRACT_REQUIRED = "contract_required";
+/** v4.0.6: A successor proposal repeats the closed contract's ACCEPTANCE ITEMS
+ *  verbatim (only work_item/scope changed). Error: a successor must bring
+ *  genuinely new acceptance conditions, or it would re-verify the old slice. */
+export declare const CHECK_CONTRACT_SUCCESSOR_UNCHANGED = "contract_successor_unchanged";
 /** v3.7.1: A cited gate (evaluation.gate_ids) is not approved. Opt-in:
  *  checked ONLY when policy.gate.enabled — citations are meaningless when
  *  the gate layer is off. Error → enforcement rejects the round. */
@@ -101,22 +106,6 @@ export interface EvidenceStatus {
  *  of letting evidence-dependent checks silently disappear when snapshots are
  *  missing — the fix for the "weakest when it matters most" gap. */
 export declare function deriveEvidenceStatus(selfEval: SelfEvaluation, evidenceDeltas: ReadonlyArray<ObservationDelta>): EvidenceStatus;
-interface ParsedTestCounts {
-    passed: number;
-    failed: number;
-    skipped: number;
-    total: number;
-}
-/** Best-effort parse of test counts from common test-runner output formats.
- *
- *  Scans the last 2000 characters of stdout (where summary lines typically
- *  appear) and tries patterns in descending specificity order. Returns null
- *  when the output format is unrecognized, stdout is empty, or a confident
- *  parse cannot be made.
- *
- *  Recognized formats: Jest verbose/compact, Mocha, pytest/unittest, Go test,
- *  and PHPUnit OK summaries. */
-export declare function parseTestOutput(stdout: string): ParsedTestCounts | null;
 /** v3.8.3: The round's out-of-scope files — the ONE derivation, shared by the
  *  drift check below and the blocked-waiver test in RoundCoordinator. The two
  *  must agree on the set, or a round could be waived for a drift the gate
@@ -146,5 +135,4 @@ filesReported?: boolean,
  *  for direct library callers and unit tests; it calls the same derivation
  *  function, so there is still exactly one rule. */
 facts?: RoundFacts): VerificationResult;
-export {};
 //# sourceMappingURL=verification-gate.d.ts.map

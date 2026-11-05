@@ -159,7 +159,7 @@ describe("CommandEvidenceProvider", () => {
 
 describe("required command verification", () => {
   it("contradicts a success claim when a required command failed", () => {
-    const evaluation = makeSelfEvaluation({ success: true });
+    const evaluation = makeSelfEvaluation({ outcome: "success" });
     const result = verifySelfEvaluation(evaluation, 1, [], null, deltasFrom([{
       schemaVersion: 1,
       providerId: "command:test",
@@ -197,11 +197,11 @@ describe("required command verification", () => {
     // required commands.
     try {
       const evaluation = makeSelfEvaluation({
-        success: true,
+        outcome: "success",
         execution_report: {
           files_changed: ["src/a.ts"],
-          tests_reported: { passed: 1, failed: 0, skipped: 0 },
-          criterion_claims: criterionClaims([], []),
+
+          claims: criterionClaims([], []),
         },
       });
       const result = verifySelfEvaluation(evaluation, 1, [], null, deltasFrom([{

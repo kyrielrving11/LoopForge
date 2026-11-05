@@ -234,7 +234,7 @@ The four core evaluation fields are strict:
 
 | Field | Requirement |
 | --- | --- |
-| `success` | Boolean. `true` only when the whole objective and hard constraints are satisfied. |
+| `outcome` | `success` \| `partial` \| `failed` \| `blocked`. `success` requires `should_continue=false`; `blocked` requires `should_continue=false` and a non-empty `blocker`. |
 | `output_summary` | String describing what changed and what was verified. |
 | `constraint_violations` | Array of real violations, preferably using `c-XXXXXXXX` IDs. |
 | `should_continue` | Boolean. `false` only when the whole task is complete or the Agent must stop. |
@@ -264,23 +264,35 @@ descriptions, never `sg-` IDs. `subgoal_updates` changes existing active IDs;
 done and canceled are terminal and cannot be reopened. The prompt or
 `submission_guidance` renders the real active IDs; never invent one.
 
-`outcome` may be `success`, `partial`, `failed`, or `blocked`. A blocked
-outcome needs a concrete `blocker`; `agent_stop_reason` of `blocked` or
-`needs_human_input` also stops without claiming success. It is the Agent's
-report, never LoopForge's terminal reason.
+`outcome` is the ONE round conclusion. A blocked outcome needs a concrete
+`blocker` (state a need for human input there); a failed stop is
+`outcome=failed` with `should_continue=false`. It is the Agent's report, never
+LoopForge's terminal reason. A `blocker` supplied with a non-blocked outcome is
+dropped with a diagnostic and does not reject the round.
+
+`execution_report.claims` is the ONE claims channel: `{id, outcome}` entries
+cite a `cr-` criterion id (advisory) or an `rci-` id of an ACTIVE contract item
+(strict). A claim alone verifies nothing; only the bound command observation
+can mark an item verified. `objective_refinement` is event-driven, not a
+per-round field: it evolves the working version of the OVERALL starting
+objective (≤1000 chars, non-empty after trim) and changes the next prompt's
+Objective and goalId. It never rewrites Operator Acceptance, success criteria
+or hard constraints, and it is not the round task or contract. Omit it when the
+overall objective is unchanged.
 
 Optional malformed values are diagnosed and normalized or dropped. The strict
-exceptions are `subgoal_updates`, `round_contract`, and
-`execution_report.contract_item_claims`. Shape, reference, duplicate, command,
+exceptions are `subgoal_updates`, `round_contract` (including `supersedes`),
+and the `rci-` entries of `execution_report.claims`. Shape, reference, duplicate, command,
 and workspace-containment errors return `evaluation_invalid` or
 `contract_invalid` before advance. Correct the payload and resubmit with the
 same handle; the invalid attempt is not persisted and no rejection counter
 moves. `projection_incomplete` is different: it reports a LoopForge projection
 defect, not poor Agent work.
 
-When the round actually changed the workspace or ran relevant tests, report the
-corresponding `execution_report`. Do not invent an empty report or test counts
-to satisfy a field checklist. A missing or empty report on a success claim is a
+When the round actually changed the workspace or you claim criteria/contract
+items, report the corresponding `execution_report`. There is no test-count
+field: command observations are the test fact. Do not invent an empty report to
+satisfy a field checklist. A missing or empty report on a success claim is a
 reporting gap (a `warn`), not by itself a rejection: acceptance is decided by
 machine evidence and contract rules, never by optional-field coverage.
 `no_change_reason` is an escape only when no enabled verification command

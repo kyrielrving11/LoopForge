@@ -126,7 +126,7 @@ describe("MCP schema ↔ protocol schema sync", () => {
     );
     assert.deepEqual(
       [...(evaluation.required as string[])].sort(),
-      ["constraint_violations", "output_summary", "should_continue", "success"],
+      ["constraint_violations", "outcome", "output_summary", "should_continue"],
     );
   });
 
@@ -157,8 +157,8 @@ describe("MCP schema ↔ protocol schema sync", () => {
       (manifestProps.schemaVersion as SchemaNode).const,
       CHECKPOINT_SCHEMA_VERSION,
     );
-    assert.equal(ROUND_TRANSACTION_SCHEMA_VERSION, 8);
-    assert.equal(CANONICAL_STATE_SCHEMA_VERSION, 9);
+    assert.equal(ROUND_TRANSACTION_SCHEMA_VERSION, 9);
+    assert.equal(CANONICAL_STATE_SCHEMA_VERSION, 10);
     assert.equal(POLICY_SCHEMA_VERSION, "10");
     assert.equal(CHECKPOINT_SCHEMA_VERSION, 1);
   });
@@ -172,7 +172,7 @@ describe("MCP schema ↔ protocol schema sync", () => {
     assert.ok(!required.includes("workingMemory"));
   });
 
-  it("v4.0.4: publishes the renamed context vocabulary and the Agent stop field", () => {
+  it("v4.0.6: publishes outcome as the ONE conclusion and drops stop/transition fields", () => {
     const defs = schema.$defs as SchemaNode;
     const contextMode = defs.PromptContextMode as SchemaNode;
     assert.deepEqual([...(contextMode.enum as string[])].sort(), [
@@ -180,14 +180,20 @@ describe("MCP schema ↔ protocol schema sync", () => {
       "same_round_retry",
     ]);
     const selfEvalProps = (defs.SelfEvaluation as SchemaNode).properties as SchemaNode;
-    assert.ok("agent_stop_reason" in selfEvalProps,
-      "SelfEvaluation.agent_stop_reason is the only Agent stop-reason field");
-    assert.ok(!("stop_reason" in selfEvalProps),
-      "the old ambiguous Agent field must not survive");
+    assert.ok("outcome" in selfEvalProps, "outcome is the ONE round conclusion");
+    assert.ok("objective_refinement" in selfEvalProps);
+    assert.ok(!("success" in selfEvalProps), "success was removed in 4.0.6");
+    assert.ok(!("agent_stop_reason" in selfEvalProps),
+      "agent_stop_reason was removed in 4.0.6");
+    assert.ok(!("contract_transition" in selfEvalProps),
+      "contract_transition was removed in 4.0.6");
     const receiptProps =
       (defs.SubmissionReceipt as SchemaNode).properties as SchemaNode;
     assert.ok("loop_stop_reason" in receiptProps);
-    assert.ok("agent_stop_reason" in receiptProps);
+    assert.ok("agent_outcome" in receiptProps);
+    assert.ok("objective_refinement" in receiptProps);
+    assert.ok(!("agent_stop_reason" in receiptProps),
+      "the receipt no longer carries an Agent stop reason");
     assert.ok(!("machineBackedSuccess" in receiptProps),
       "the receipt never duplicates the posture's machine fact");
     assert.ok(!JSON.stringify(schema).includes("fresh_round"));
@@ -232,6 +238,8 @@ describe("MCP schema ↔ protocol schema sync", () => {
     }
     const selfEvalProps = ((schema.$defs as SchemaNode).SelfEvaluation as SchemaNode)
       .properties as SchemaNode;
-    assert.ok("agent_stop_reason" in selfEvalProps);
+    assert.ok("outcome" in selfEvalProps);
+    assert.ok(!("success" in selfEvalProps));
+    assert.ok(!("agent_stop_reason" in selfEvalProps));
   });
 });

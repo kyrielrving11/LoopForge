@@ -8,7 +8,7 @@ import { observationVersionIssue } from "./evidence-provider.js";
 import { promptContextPairIssue } from "./context-boundary.js";
 import { PROMPT_ARTIFACT_SCHEMA_VERSION, isPromptContextMode, isPromptContextReason, makeLoopRoundResult, } from "./protocol.js";
 import { ROUND_TRANSACTION_SCHEMA_VERSION, deriveRoundObservationDelta, isProcessResult, parseRoundTransactionSnapshot, rootBranchId, transactionSchemaVersionOf, } from "./round-transaction.js";
-import { effectiveOutcome, parseContractTransition, parseRoundContract, } from "./self-eval.js";
+import { effectiveOutcome, parseRoundContract, } from "./self-eval.js";
 import { entryRound, isRecord } from "./token-utils.js";
 import { transactionIdentityIssue } from "./transaction-identity.js";
 function committedAction(value) {
@@ -88,6 +88,9 @@ function viewFromSnapshot(input) {
     const beforeEvidence = snapshots(snapshot.beforeEvidence);
     const afterEvidence = snapshots(snapshot.afterEvidence);
     const observationDelta = deriveRoundObservationDelta(beforeEvidence, afterEvidence);
+    const contractProposal = evaluation?.round_contract
+        ? parseRoundContract(evaluation.round_contract) ?? null
+        : null;
     return {
         source: input.source,
         sourceEntry: input.sourceEntry,
@@ -117,12 +120,12 @@ function viewFromSnapshot(input) {
         action,
         agentSuccessClaim: result.agentSuccessClaim === true,
         agentOutcome: result.agentOutcome ?? outcome,
-        contractProposal: evaluation?.round_contract
-            ? parseRoundContract(evaluation.round_contract) ?? null
-            : null,
-        contractTransition: evaluation
-            ? parseContractTransition(evaluation.contract_transition) ?? null
-            : null,
+        ...(evaluation && typeof evaluation.objective_refinement === "string" &&
+            evaluation.objective_refinement.trim().length > 0
+            ? { objectiveRefinement: evaluation.objective_refinement }
+            : {}),
+        contractProposal,
+        contractRedirect: contractProposal?.supersedes ?? null,
         contractBinding: snapshot.contractBinding ?? null,
         beforeEvidence,
         afterEvidence,
@@ -168,10 +171,9 @@ export function decodeCommittedRound(entry) {
     const resultValue = isRecord(transaction.result)
         ? transaction.result
         : snapshot.result;
-    // v4.0.3/v4.0.4: a current-schema (8) committed result must carry a
-    // well-formed Evidence Posture and the Agent's `agent_stop_reason` lives in
-    // its evaluation. Missing/corrupt posture is a HARD break, not something to
-    // re-derive at read time.
+    // v4.0.3/v4.0.6: a current-schema (9) committed result must carry a
+    // well-formed Evidence Posture and a well-formed Agent outcome. A missing or
+    // corrupt posture/result is a HARD break, never re-derived at read time.
     if (!isRecord(resultValue) || !isProcessResult(resultValue))
         return null;
     return viewFromSnapshot({

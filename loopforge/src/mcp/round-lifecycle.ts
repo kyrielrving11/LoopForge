@@ -50,7 +50,7 @@ import {
 } from "../round-transaction.js";
 import { deriveActiveRoundContract } from "../round-contract.js";
 import { deriveSubGoals } from "../subgoal-state.js";
-import { declaresBlocked, effectiveOutcome } from "../round-outcome.js";
+import { declaresBlocked, effectiveOutcome, effectiveSuccess } from "../round-outcome.js";
 import {
   deriveCommittedSubmissionView,
   deriveSubmissionReceipt,
@@ -327,9 +327,9 @@ export interface AdvanceResult {
    *  results that have no session (for example a missing-handle refusal). */
   loopId?: string;
   /** On a continue result this is the NEXT round being prepared; the
-   *  `agentOutcome`/`agentStopReason` fields and the receipt describe the
-   *  round that was just submitted. Use `submission_receipt.round_id` as the
-   *  authoritative identity of the submitted round. */
+   *  `agentOutcome` field and the receipt describe the round that was just
+   *  submitted. Use `submission_receipt.round_id` as the authoritative
+   *  identity of the submitted round. */
   round: number;
   /** v4.0.0: the ONE transport anchor for the held attempt. Derived from the
    *  persisted snapshot; never persisted itself. Absent on terminal results. */
@@ -359,12 +359,8 @@ export interface AdvanceResult {
   contextMode?: PromptContextMode;
   contextReason?: PromptContextReason;
   agentSuccessClaim?: boolean;
-  /** v4.0.3: the effective Agent-declared outcome of the round this result
-   *  is about. */
+  /** v4.0.6: the Agent-declared outcome of the round this result is about. */
   agentOutcome?: RoundOutcome | null;
-  /** v4.0.4: the Agent's declared stop reason of the round this result is
-   *  about (an Agent report, never a loop terminal reason). */
-  agentStopReason?: "gave_up" | "blocked" | "needs_human_input";
   /** v4.0.4: the Agent's declared should_continue of the same round. */
   agentShouldContinue?: boolean;
   warnings?: string[];
@@ -503,7 +499,6 @@ export function buildLoopRequest(
   return {
     loop_id: session.loopId,
     round: session.currentRound,
-    goal_id: "",
     task: session.task,
     // Round 1 has no committed acceptance to read from history; the session
     // cursor is the bootstrap. Later rounds read the committed copy.
@@ -1203,7 +1198,6 @@ export class RoundLifecycle {
         ).join("\n"),
         agentSuccessClaim: pr.agentSuccessClaim,
         agentOutcome: pr.agentOutcome,
-        agentStopReason: recovered.snapshot.evaluation?.agent_stop_reason,
         agentShouldContinue: recovered.snapshot.evaluation?.should_continue,
         ...(receipt ? { submission_receipt: receipt } : {}),
       };
@@ -1335,7 +1329,7 @@ export class RoundLifecycle {
     return this.buildBacktrackResult(session.sessionId, session, pr, {
       snapshot,
       selfEval: {
-        success: false,
+        outcome: "failed",
         output_summary: "",
         constraint_violations: [],
         should_continue: true,
@@ -2270,11 +2264,10 @@ export class RoundLifecycle {
     return {
       agent: selfEval
         ? {
-            successClaim: selfEval.success,
+            successClaim: effectiveSuccess(selfEval),
             outcome: effectiveOutcome(selfEval),
-            outcomeDeclared: selfEval.outcome ?? null,
             shouldContinue: selfEval.should_continue,
-            agentStopReason: selfEval.agent_stop_reason ?? null,
+            blocker: selfEval.blocker?.trim() || null,
           }
         : null,
       loopforge: {
@@ -2335,7 +2328,6 @@ export class RoundLifecycle {
       ).join("\n"),
       agentSuccessClaim: terminal.agentSuccessClaim,
       agentOutcome: terminal.agentOutcome,
-      agentStopReason: terminal.evaluation?.agent_stop_reason,
       agentShouldContinue: terminal.evaluation?.should_continue,
       submission_receipt: deriveCommittedSubmissionView(
         terminal,
@@ -2381,8 +2373,9 @@ export class RoundLifecycle {
       sessionStatus: "stopped",
       agentSuccessClaim: pr.agentSuccessClaim,
       agentOutcome: pr.agentOutcome,
-      agentStopReason: receiptBase.selfEval.agent_stop_reason,
       agentShouldContinue: receiptBase.selfEval.should_continue,
+      // v4.0.6: the Agent's outcome/blocker are the report; LoopForge's
+      // terminal reason is `stopReason`.
       // v4.0.4: a terminated attempt never committed, so its posture is
       // explicitly transient; no committed receipt is fabricated.
       stopDetail: renderResultFacts(
@@ -2427,8 +2420,9 @@ export class RoundLifecycle {
       sessionStatus: session.status,
       agentSuccessClaim: pr.agentSuccessClaim,
       agentOutcome: pr.agentOutcome,
-      agentStopReason: receiptBase.selfEval.agent_stop_reason,
       agentShouldContinue: receiptBase.selfEval.should_continue,
+      // v4.0.6: the Agent's outcome/blocker are the report; LoopForge's
+      // terminal reason is `stopReason`.
       // v4.0.4: `completed` no longer implies machine success; the three
       // fact blocks state the Agent report, the LoopForge decision and the
       // persisted posture separately.
@@ -2801,7 +2795,7 @@ export class RoundLifecycle {
       tx.pr.stopReason,
       receiptSelfEval,
       undefined,
-      receiptSelfEval.contract_transition ?? null,
+      receiptSelfEval.round_contract?.supersedes ?? null,
     );
     if (finalized.reason !== tx.pr.stopReason) {
       logEvent("completion_truth_downgraded", {

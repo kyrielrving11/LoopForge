@@ -5,7 +5,7 @@
  */
 import { createHash } from "node:crypto";
 import { deriveConfiguredCapability, getPolicy } from "./policy.js";
-import { AgentStatus, makeLoopCompileResponse, operatorAcceptanceFromObjective, makeLoopObjective, makeConstraintMeta, } from "./protocol.js";
+import { AgentStatus, makeLoopCompileResponse, makeLoopObjective, makeConstraintMeta, } from "./protocol.js";
 import { createCanonicalLoopState, renderCanonicalStateMarkdown, } from "./canonical-state.js";
 import { pendingBacktrackRecord, roundResultFromCommittedRound, } from "./committed-round.js";
 import { buildCommittedHistory, historyWindow, operatorAcceptanceKey, } from "./history.js";
@@ -32,8 +32,11 @@ export function computeGoalTextHash(text) {
     const normalized = text.trim().replace(/\s+/g, " ").toLowerCase();
     return createHash("sha256").update(normalized).digest("hex").slice(0, 12);
 }
-export function deriveGoalId(loopId, task, explicit = "") {
-    return explicit.trim() || `${loopId}:${task.trim().toLowerCase()
+/** v4.0.6: goal identity derives from the WORKING objective (the latest
+ *  committed objective_refinement, else Operator Acceptance). There is no
+ *  caller-supplied goal_id override. */
+export function deriveGoalId(loopId, task) {
+    return `${loopId}:${task.trim().toLowerCase()
         .replace(/[^a-z0-9\u4e00-\u9fff]+/g, "-")
         .replace(/^-|-$/g, "")
         .slice(0, 48) || computeGoalTextHash(task)}`;
@@ -51,24 +54,40 @@ function previousRoundFromWindow(window, round) {
         goal_id: view.compiled?.goalId ?? "",
     };
 }
-/** The operator objective from the immutable acceptance carried by a committed
- *  evaluation or rollback directive. Acceptance is byte-identical across
- *  copies (enforced by the history loader), so it does not need a round or
- *  branch window. */
+/** v4.0.6: THE working objective.
+ *
+ *  - The immutable operator surface is the committed `OperatorAcceptance`.
+ *    Acceptance is byte-identical across copies (enforced by the history
+ *    loader), so it does not need a round or branch window.
+ *  - The objective TEXT is the latest committed `objective_refinement` on the
+ *    CURRENT BRANCH, else the acceptance task. A refinement from a branch
+ *    that was rolled back never applies.
+ *  - Success criteria and hard constraints ALWAYS come from the acceptance; a
+ *    refinement can never rewrite them.
+ *
+ *  Read-only callers that only need criteria/hard constraints read those
+ *  fields; they must not treat `objective` as the operator acceptance text. */
 export function latestObjective(loopId, context) {
     const history = buildCommittedHistory(contextEntries(context));
-    for (const view of history.views) {
-        if (!view.operatorAcceptance)
-            continue;
-        return makeLoopObjective({
-            objective: view.operatorAcceptance.task,
-            success_criteria: [...view.operatorAcceptance.success_criteria],
-            hard_constraints: [...view.operatorAcceptance.hard_constraints],
-            created_at_round: 1,
-            loop_id: loopId,
-        });
+    const acceptanceView = history.rounds.find((view) => view.operatorAcceptance) ??
+        history.views.find((view) => view.operatorAcceptance);
+    if (!acceptanceView?.operatorAcceptance)
+        return null;
+    const acceptance = acceptanceView.operatorAcceptance;
+    let objective = acceptance.task;
+    for (const view of history.rounds) {
+        const refinement = view.objectiveRefinement;
+        if (typeof refinement === "string" && refinement.trim().length > 0) {
+            objective = refinement;
+        }
     }
-    return null;
+    return makeLoopObjective({
+        objective,
+        success_criteria: [...acceptance.success_criteria],
+        hard_constraints: [...acceptance.hard_constraints],
+        created_at_round: 1,
+        loop_id: loopId,
+    });
 }
 function evolveObjective(request, context, operatorAcceptance) {
     // v3.9.7: committed acceptance is authoritative once it exists. A transient
@@ -78,9 +97,12 @@ function evolveObjective(request, context, operatorAcceptance) {
     const committed = latestObjective(request.loop_id, context);
     const allowRequestObjective = request.loop_objective !== null &&
         (request.round === 1 || committed === null);
+    // v4.0.6: the accepted objective's TEXT is the working objective
+    // (committed refinement or acceptance task); criteria/hard constraints come
+    // from the immutable acceptance. The refinement never rewrites acceptance.
     const accepted = operatorAcceptance
         ? makeLoopObjective({
-            objective: operatorAcceptance.task,
+            objective: committed?.objective || operatorAcceptance.task,
             success_criteria: [...operatorAcceptance.success_criteria],
             hard_constraints: [...operatorAcceptance.hard_constraints],
             created_at_round: 1,
@@ -228,9 +250,9 @@ function deriveMachineStatus(rounds, currentRound) {
 }
 /** v3.2: Derive per-criterion status — the "goal → criteria → evidence"
  *  vertical view. Each objective criterion gets claimed/remaining/unknown
- *  (from per-round criterion_claims, ID-first or normalized-exact matching)
- *  and the round it was first reported met. Zero persistence — re-derived
- *  from committed rounds every compile.
+ *  (from the `cr-` entries of per-round execution_report.claims, ID-first or
+ *  normalized-exact matching) and the round it was first reported met. Zero
+ *  persistence — re-derived from committed rounds every compile.
  *
  *  v3.9.6: the derivation lives in `criterion-status.ts` so the submission
  *  boundary and guidance can read the same rows without importing this module
@@ -347,7 +369,7 @@ function resolvePreviousRoundFacts(request, entries, windowRounds) {
         recoveryBoundary,
     };
 }
-function levelDecision(request, prior, previous) {
+function levelDecision(request, prior, previous, goalId) {
     return decidePromptLevel({
         round: request.round,
         attempt: request.attempt,
@@ -355,9 +377,11 @@ function levelDecision(request, prior, previous) {
         hasPlanSource: Boolean(request.plan_source),
         recoveryBoundary: previous.recoveryBoundary,
         subtaskBoundary: previous.result?.subtask_boundary === true,
-        // An empty goal_id is unobservable, not a goal change: never fabricate L2.
+        // An empty prior goal_id is unobservable, not a goal change: never
+        // fabricate L2. `goalId` is derived from the working objective, so an
+        // objective_refinement legitimately changes it.
         goalChanged: prior !== null && prior.goal_id !== "" &&
-            prior.goal_id !== deriveGoalId(request.loop_id, request.task, request.goal_id),
+            prior.goal_id !== goalId,
         previousStateMissing: request.round > 1 && prior === null,
         // v4.0.3: prompt density consumes one explicit previous-round bundle.
         // Agent outcome remains semantic input; posture/finding facts remain
@@ -376,11 +400,14 @@ function levelDecision(request, prior, previous) {
         invocationRecovery: request.invocation_recovery === true,
     });
 }
-export function decideLevel(request, context) {
+export function decideLevel(request, context, workingObjective) {
     const entries = contextEntries(context);
-    const window = historyWindow(buildCommittedHistory(entries), request.round);
+    const history = buildCommittedHistory(entries);
+    const window = historyWindow(history, request.round);
     const prior = previousRoundFromWindow(window, request.round - 1);
-    return levelDecision(request, prior, resolvePreviousRoundFacts(request, entries, window)).level;
+    const objective = workingObjective ??
+        latestObjective(request.loop_id, context)?.objective ?? request.task;
+    return levelDecision(request, prior, resolvePreviousRoundFacts(request, entries, window), deriveGoalId(request.loop_id, objective)).level;
 }
 /** The prompt's evaluation block. All content (examples, contract/sub-goal
  *  guidance, flag-specific hints) comes from the one FIELD_GUIDES table in
@@ -467,8 +494,12 @@ export function compileLoop(request, context, options = {}, committedHistory) {
     const windowRounds = historyWindow(history, request.round);
     const prior = previousRoundFromWindow(windowRounds, request.round - 1);
     const previous = resolvePreviousRoundFacts(request, entries, windowRounds);
-    const decision = levelDecision(request, prior, previous);
+    // v4.0.6: the working objective is computed BEFORE the level decision —
+    // a committed objective_refinement changes goal identity, and that change
+    // must be able to select L2.
     const objective = evolveObjective(request, context, operatorAcceptance);
+    const goalId = deriveGoalId(request.loop_id, objective.objective);
+    const decision = levelDecision(request, prior, previous, goalId);
     const pendingDirective = pendingBacktrackRecord(entries, request.round);
     const preservedDiscoveries = pendingDirective?.recovery &&
         getPolicy().engine.backtrack_preserve_discoveries
@@ -583,7 +614,7 @@ export function compileLoop(request, context, options = {}, committedHistory) {
         constraint_metadata: constraintLifecycle.metadata,
         loop_id: request.loop_id,
         round: request.round,
-        goal_id: deriveGoalId(request.loop_id, request.task, request.goal_id),
+        goal_id: goalId,
         loop_objective: objective,
         sub_goals: subGoals,
         criterion_statuses: criterionStatuses,
@@ -687,10 +718,16 @@ export function compileLoop(request, context, options = {}, committedHistory) {
     response.prompt = artifact.renderedPrompt;
     response.prompt_artifact = artifact;
     response.state_file_content = policy.state_file.enabled ? markdown : undefined;
-    response.operatorAcceptance = operatorAcceptance ?? committedAcceptance ??
-        operatorAcceptanceFromObjective(objective);
-    response.compiled = {
+    // v4.0.6: the fallback acceptance uses the immutable facts, never the
+    // working objective text: `objective.objective` may be an Agent refinement
+    // and must not be written back as Operator Acceptance.
+    response.operatorAcceptance = operatorAcceptance ?? committedAcceptance ?? {
         task: request.task,
+        success_criteria: [...objective.success_criteria],
+        hard_constraints: [...objective.hard_constraints],
+    };
+    response.compiled = {
+        task: objective.objective,
         goalId: response.goal_id,
         constraintsActive: [...constraintLifecycle.active],
         constraintsRetired: [...constraints.retired],

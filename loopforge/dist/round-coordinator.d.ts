@@ -21,7 +21,7 @@ import type { LoopStore } from "./loop-store.js";
 import { type CommittedHistory } from "./history.js";
 import type { MachineObservation } from "./protocol.js";
 import type { ObservationDelta } from "./evidence-provider.js";
-import type { CheckpointRef, ContractTransition, EvidencePosture, SelfEvaluation, StopReason, VerificationFlag, WorkspaceCheckpointManifest } from "./protocol.js";
+import type { CheckpointRef, ContractSupersede, EvidencePosture, RoundOutcome, SelfEvaluation, StopReason, VerificationFlag, WorkspaceCheckpointManifest } from "./protocol.js";
 import type { ContractItemStatusView } from "./contract-items.js";
 /** Input to a single round processing step. */
 export interface RoundProcessInput {
@@ -85,11 +85,12 @@ export interface RoundProcessResult {
     enforcementAction?: "accept" | "reject" | "terminate" | "backtrack" | "recovery";
     /** Enforcement reason (set when rejected or terminated). */
     enforcementReason?: string;
-    /** v4.0.3: the Agent's success claim (`selfEval.success`). This is a claim,
-     *  never a machine verdict. */
+    /** v4.0.3/v4.0.6: the Agent's success claim — a derived projection of
+     *  `outcome === "success"`, never a machine verdict and never an input
+     *  field. */
     agentSuccessClaim: boolean;
-    /** v4.0.3: the effective Agent-declared outcome. */
-    agentOutcome: import("./protocol.js").RoundOutcome | null;
+    /** v4.0.6: the Agent-declared outcome; null only for a rollback directive. */
+    agentOutcome: RoundOutcome | null;
     /** Whether the verification gate returned "contradicted". */
     gateContradicted: boolean;
     /** v4.0.3: the ONE evidence posture, derived once per round and persisted
@@ -129,9 +130,9 @@ export declare function finalizeStopReason(
 /** `undefined` when the disposition named no terminal reason at all (the
  *  callers fall back to their own default) — there is nothing to guard. */
 reason: StopReason | undefined, selfEval: SelfEvaluation, contractStatuses?: ContractItemStatusView | null,
-/** v3.9.9: the current round's transition. A committed redirect can never
- *  produce `completed` even if the old items were all verified. */
-transition?: ContractTransition | null): {
+/** v3.9.9/v4.0.6: the current round's redirect. A committed redirect can
+ *  never produce `completed` even if the old items were all verified. */
+redirect?: ContractSupersede | null): {
     reason: StopReason | undefined;
     flags: VerificationFlag[];
 };

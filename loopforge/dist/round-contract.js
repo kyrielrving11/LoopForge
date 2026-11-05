@@ -34,7 +34,7 @@ export function activateContract(proposal, declaredAtRound, binding, loopId) {
         scope: [...(proposal.scope ?? [])],
         items: proposal.items.map((item, index) => ({
             description: item.description,
-            criterion_refs: [...item.criterion_refs],
+            criterion_refs: [...(item.criterion_refs ?? [])],
             verify_with: [...item.verify_with],
             id: itemIds[index],
         })),
@@ -51,7 +51,7 @@ export const NO_CURRENT_ROUND_FACTS = {
     report: null,
     deltas: [],
     blocked: false,
-    transition: null,
+    redirect: null,
 };
 /** Read a committed view's current-round facts. Read views (audit/explain/
  *  receipt/round-facts) use this instead of hand-building `outcome`-only
@@ -63,12 +63,14 @@ export function committedRoundFacts(view) {
         blocked: view.evaluation
             ? declaresBlocked(view.evaluation)
             : view.agentOutcome === "blocked",
-        transition: view.contractTransition,
+        redirect: view.contractRedirect,
     };
 }
-/** The successor's acceptance CONTENT must actually change. A new work_item
- *  or scope label alone is not a new slice. */
-function acceptanceItemsDiffer(proposal, active) {
+/** v4.0.6: The successor's acceptance CONTENT must actually change. A new
+ *  work_item or scope label alone is not a new slice. Exported because the
+ *  verification gate's `contract_successor_unchanged` check uses the SAME
+ *  content identity. */
+export function acceptanceItemsDiffer(proposal, active) {
     const next = new Set(proposal.items.map((item) => canonicalContractItemText(item)));
     const current = new Set(active.items.map((item) => canonicalContractItemText(item)));
     if (next.size !== current.size)
@@ -104,7 +106,7 @@ export function deriveActiveRoundContract(rounds, commands = getPolicy().evidenc
             currentBlocked: round.evaluation
                 ? declaresBlocked(round.evaluation)
                 : round.agentOutcome === "blocked",
-            currentTransition: round.contractTransition,
+            currentRedirect: round.contractRedirect,
             commands,
         });
         if (statuses.closure === "blocked" || statuses.closure === "verified") {
@@ -150,7 +152,7 @@ export function deriveRoundContractView(input) {
             currentReport: input.current.report,
             currentDeltas: input.current.deltas,
             currentBlocked: input.current.blocked,
-            currentTransition: input.current.transition,
+            currentRedirect: input.current.redirect,
             commands: input.commands,
         }),
     };

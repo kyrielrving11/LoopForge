@@ -78,7 +78,6 @@ function minimalState(overrides: Partial<CanonicalLoopState> = {}): CanonicalLoo
       criteriaRemaining: [],
       agentReportedRemaining: [],
       filesChanged: [],
-      tests: null,
     },
     ...overrides,
   };
@@ -248,7 +247,7 @@ describe("assemblePromptArtifact — L2", () => {
         criteriaMet: ["auth"], criteriaRemaining: ["api"],
         agentReportedRemaining: ["api"],
         filesChanged: ["src/auth.ts"],
-        tests: { passed: 42, failed: 0, skipped: 0 },
+
       },
       retiredConstraints: ["old-rule"],
     });
@@ -542,9 +541,10 @@ describe("v3.2 — verification flag actions", () => {
       .map((key) => exports[key] as string);
     // v3.7 note: CHECK_DOMAIN (the domain map) is also a CHECK_-prefixed
     // export but is not a check id — filtered above by the string check.
-    // v3.9.7: 19 — R9 (post-backtrack restore) was deleted.
-    assert.ok(checks.length === 19,
-      `expected the 19 surviving CHECK_* constants, got ${checks.length}`);
+    // v4.0.6: 18 — the two outcome-consistency checks and the test-count
+    // mismatch check were removed; three contract-coverage checks remain.
+    assert.ok(checks.length === 18,
+      `expected the 18 surviving CHECK_* constants, got ${checks.length}`);
     for (const check of checks) {
       const action = verificationActionFor(check);
       assert.ok(
@@ -600,7 +600,7 @@ describe("v3.3 — machine dashboard rows and round stats", () => {
         criteriaRemaining: [],
         agentReportedRemaining: [],
         filesChanged: ["src/a.ts"],
-        tests: { passed: 8, failed: 1, skipped: 0 },
+
       },
       machineStatus: {
         windowRounds: 3,

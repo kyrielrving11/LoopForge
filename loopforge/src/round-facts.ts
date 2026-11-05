@@ -18,7 +18,7 @@ import type { ObservationDelta } from "./evidence-provider.js";
 import type { CommandEvidencePolicy } from "./policy.js";
 import type {
   ContractItemStatus,
-  ContractTransition,
+  ContractSupersede,
   ExecutionReport,
 } from "./protocol.js";
 import type { ActiveContractView } from "./round-contract.js";
@@ -63,8 +63,9 @@ export interface InFlightRoundSlice {
   /** The in-flight round's own blocked declaration. A `blocked` round CLOSES
    *  its contract, so closure cannot be derived from committed slices alone. */
   currentBlocked?: boolean;
-  /** v3.9.9: the in-flight round's explicit contract redirect. */
-  currentTransition?: ContractTransition | null;
+  /** v3.9.9/v4.0.6: the in-flight round's explicit contract redirect
+   *  (`round_contract.supersedes`). */
+  currentRedirect?: ContractSupersede | null;
   /** Legacy shape accepted by library callers; `blocked` wins when present. */
   currentOutcome?: string | null;
 }
@@ -73,7 +74,7 @@ export const NO_IN_FLIGHT_ROUND: InFlightRoundSlice = {
   currentReport: null,
   currentDeltas: [],
   currentBlocked: false,
-  currentTransition: null,
+  currentRedirect: null,
   currentOutcome: null,
 };
 
@@ -93,7 +94,7 @@ export function deriveRoundFacts(input: {
     currentDeltas: input.inFlight.currentDeltas,
     currentBlocked: input.inFlight.currentBlocked ??
       input.inFlight.currentOutcome === "blocked",
-    currentTransition: input.inFlight.currentTransition ?? null,
+    currentRedirect: input.inFlight.currentRedirect ?? null,
     commands: input.commands,
   });
   return {
@@ -140,7 +141,7 @@ export function deriveCriterionFacts(input: {
     for (const item of contract.items) {
       const itemStatus = statusByItem.get(item.id);
       if (!itemStatus || itemStatus === "pending") continue;
-      for (const ref of item.criterion_refs) {
+      for (const ref of item.criterion_refs ?? []) {
         if (!isCriterionId(ref)) continue;
         roundBest.set(ref, strongestStatus(roundBest.get(ref), itemStatus));
       }

@@ -1,4 +1,5 @@
-/** v3.9.9 — explicit contract redirection (contract_transition). */
+/** v3.9.9 / v4.0.6 — explicit contract redirection
+ *  (`round_contract.supersedes`). */
 import { describe, it, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import {
@@ -6,14 +7,14 @@ import {
   makeSelfEvaluation,
   makeVerificationResult,
   type CommandObservation,
-  type ContractTransition,
+  type ContractSupersede,
   type RoundContractProposal,
   type SelfEvaluation,
 } from "../protocol.js";
 import type { CommandEvidencePolicy } from "../policy.js";
 import {
-  parseContractTransition,
-  validateContractTransition,
+  parseContractSupersede,
+  validateContractShape,
 } from "../self-eval.js";
 import {
   canonicalContractItemText,
@@ -95,8 +96,7 @@ function commandObservation(): CommandObservation {
 const CONTRACT_ID = deriveContractId("ct", CONTRACT);
 const SUCCESSOR_ID = deriveContractId("ct", SUCCESSOR);
 const ITEM_ID = deriveContractItemIds(CONTRACT.items)[0]!;
-const TRANSITION: ContractTransition = {
-  kind: "supersede",
+const TRANSITION: ContractSupersede = {
   contract_id: CONTRACT_ID,
   reason: "A depends on the shared store",
 };
@@ -115,7 +115,7 @@ function declaringRound(loopId = "ct") {
 
 function redirectRound(input: {
   loopId?: string;
-  transition?: ContractTransition;
+  transition?: ContractSupersede;
   contract?: RoundContractProposal;
   claimsMet?: boolean;
   withCommand?: boolean;
@@ -123,8 +123,10 @@ function redirectRound(input: {
   const loopId = input.loopId ?? "ct";
   return decodeCommittedRound(committedFeedbackRound(2, {
     loopId,
-    contract: input.contract ?? SUCCESSOR,
-    contractTransition: input.transition ?? TRANSITION,
+    contract: {
+      ...(input.contract ?? SUCCESSOR),
+      supersedes: input.transition ?? TRANSITION,
+    },
     contractItemClaims: input.claimsMet
       ? [{ item_id: ITEM_ID, outcome: "met" }]
       : [],
@@ -136,98 +138,91 @@ function redirectRound(input: {
 // Parsing and strict boundary
 // ═══════════════════════════════════════════════════════════════════════════
 
-describe("contract_transition — parsing", () => {
-  it("keeps a well-formed transition and drops malformed ones with diagnostics", () => {
+describe("round_contract.supersedes — parsing", () => {
+  it("keeps a well-formed redirect and drops malformed ones with diagnostics", () => {
     assert.deepEqual(
-      parseContractTransition({
-        kind: "supersede",
+      parseContractSupersede({
         contract_id: CONTRACT_ID,
         reason: "route changed",
       }),
-      { kind: "supersede", contract_id: CONTRACT_ID, reason: "route changed" },
+      { contract_id: CONTRACT_ID, reason: "route changed" },
     );
     const diagnostics: Array<{ path: string; code: string }> = [];
-    assert.equal(parseContractTransition({ kind: "nope" }, {
-      push: (path, code) => diagnostics.push({ path, code }),
+    assert.equal(parseContractSupersede({ contract_id: "nope" }, {
+      push: (path, code, _handling, _detail) => diagnostics.push({ path, code }),
     }), undefined);
-    assert.ok(diagnostics.some((entry) =>
-      entry.path === "contract_transition" && entry.code === "invalid_enum"));
+    assert.ok(diagnostics.some((entry) => entry.code === "invalid_id"));
   });
 });
 
-describe("contract_transition — strict boundary", () => {
+describe("round_contract.supersedes — strict boundary", () => {
   const itemIdentity = canonicalContractItemText(CONTRACT.items[0]!);
   const context = {
     observed: true,
     activeContractId: CONTRACT_ID,
     activeItemIdentities: new Set([itemIdentity]),
+    activeItemIds: null,
+    knownCriterionIds: null,
+    isConfiguredCommand: (name: string) => name === "verify",
   };
   const valid = {
     should_continue: true,
-    contract_transition: { kind: "supersede", contract_id: CONTRACT_ID },
-    round_contract: SUCCESSOR,
+    round_contract: { ...SUCCESSOR, supersedes: { contract_id: CONTRACT_ID } },
   };
 
-  it("accepts a targeted transition with a changed successor", () => {
-    assert.deepEqual(validateContractTransition(valid, context), []);
+  it("accepts a targeted redirect with a changed successor", () => {
+    assert.deepEqual(validateContractShape(valid, context), []);
   });
 
   it("rejects structural defects", () => {
     const cases: Array<{ raw: Record<string, unknown>; reason: string }> = [
       {
-        raw: { ...valid, contract_transition: { kind: "other", contract_id: CONTRACT_ID } },
-        reason: "invalid_kind",
-      },
-      {
-        raw: { ...valid, contract_transition: { kind: "supersede", contract_id: "nope" } },
+        raw: { ...valid, round_contract: {
+          ...SUCCESSOR, supersedes: { contract_id: "nope" } } },
         reason: "invalid_contract_id",
       },
       {
-        raw: { ...valid, contract_transition: { ...TRANSITION, extra: true } },
+        raw: { ...valid, round_contract: {
+          ...SUCCESSOR, supersedes: { ...TRANSITION, extra: true } } },
         reason: "unknown_field",
       },
       {
-        raw: { ...valid, contract_transition: { ...TRANSITION, reason: "x".repeat(501) } },
+        raw: { ...valid, round_contract: {
+          ...SUCCESSOR, supersedes: { ...TRANSITION, reason: "x".repeat(501) } } },
         reason: "invalid_reason",
       },
       {
-        raw: { ...valid, round_contract: undefined },
-        reason: "transition_without_successor",
-      },
-      {
-        raw: { ...valid, outcome: "blocked" },
-        reason: "transition_conflicts_with_blocked",
-      },
-      {
-        raw: { ...valid, agent_stop_reason: "needs_human_input" },
-        reason: "transition_conflicts_with_blocked",
+        raw: { ...valid, outcome: "blocked", blocker: "blocked" },
+        reason: "supersede_conflicts_with_blocked",
       },
       {
         raw: { ...valid, should_continue: false },
-        reason: "transition_on_stop",
+        reason: "supersede_on_stop",
       },
       {
-        raw: { ...valid, contract_transition: { ...TRANSITION, contract_id: "rc-99999999" } },
-        reason: "transition_target_mismatch",
+        raw: { ...valid, round_contract: {
+          ...SUCCESSOR, supersedes: { ...TRANSITION, contract_id: "rc-99999999" } } },
+        reason: "supersede_target_mismatch",
       },
       {
         raw: {
           ...valid,
-          round_contract: { ...CONTRACT, work_item: "Renamed", scope: ["src/other"] },
+          round_contract: { ...CONTRACT, work_item: "Renamed", scope: ["src/other"],
+            supersedes: { contract_id: CONTRACT_ID } },
         },
-        reason: "transition_without_change",
+        reason: "supersede_without_change",
       },
     ];
     for (const { raw, reason } of cases) {
-      const errors = validateContractTransition(raw, context);
+      const errors = validateContractShape(raw, context);
       assert.ok(errors.some((error) => error.reason === reason),
         `${reason}: ${JSON.stringify(errors)}`);
     }
   });
 
   it("reports no_active_contract when the loop has no active contract", () => {
-    const errors = validateContractTransition(valid, {
-      observed: true,
+    const errors = validateContractShape(valid, {
+      ...context,
       activeContractId: null,
       activeItemIdentities: null,
     });
@@ -235,10 +230,14 @@ describe("contract_transition — strict boundary", () => {
   });
 
   it("fails open on target/content checks when the session is unobservable", () => {
-    const errors = validateContractTransition({
+    const errors = validateContractShape({
       ...valid,
-      contract_transition: { kind: "supersede", contract_id: "rc-99999999" },
+      round_contract: {
+        ...SUCCESSOR,
+        supersedes: { contract_id: "rc-99999999" },
+      },
     }, {
+      ...context,
       observed: false,
       activeContractId: null,
       activeItemIdentities: null,
@@ -251,7 +250,7 @@ describe("contract_transition — strict boundary", () => {
 // Closure and the active-contract walker
 // ═══════════════════════════════════════════════════════════════════════════
 
-describe("contract_transition — superseded closure", () => {
+describe("supersedes — superseded closure", () => {
   it("outranks verified and keeps the old items visible", () => {
     const declaring = declaringRound();
     const redirect = redirectRound({ claimsMet: true, withCommand: true });
@@ -282,7 +281,7 @@ describe("contract_transition — superseded closure", () => {
   it("ignores an abnormal target and keeps the original contract", () => {
     const declaring = declaringRound();
     const redirect = redirectRound({
-      transition: { kind: "supersede", contract_id: "rc-99999999" },
+      transition: { contract_id: "rc-99999999" },
     });
     const { statuses } = deriveRoundContractView({
       rounds: [declaring, redirect],
@@ -296,10 +295,7 @@ describe("contract_transition — superseded closure", () => {
       CONTRACT_ID);
   });
 
-  it("read views treat agent_stop_reason=blocked as a blocked closure", () => {
-    // The live coordinator always saw both blocked declarations; read views
-    // used to pass only `outcome`, so a `agent_stop_reason: "blocked"` round could
-    // look open there. The shared fact bundle removes that second judgment.
+  it("read views treat outcome=blocked as a blocked closure", () => {
     const declaring = committedFeedbackRound(1, {
       loopId: "ct",
       contract: CONTRACT,
@@ -309,11 +305,12 @@ describe("contract_transition — superseded closure", () => {
         config_hash_by_command: {},
       },
     });
-    const blocked = committedFeedbackRound(2, { loopId: "ct" });
-    const envelope = (blocked.loop_lineage as Record<string, unknown>)
-      .round_transaction as Record<string, unknown>;
-    ((envelope.snapshot as Record<string, unknown>)
-      .evaluation as Record<string, unknown>).agent_stop_reason = "blocked";
+    const blocked = committedFeedbackRound(2, {
+      loopId: "ct",
+      outcome: "blocked",
+      blocker: "blocked by the missing shared store",
+      shouldContinue: false,
+    });
 
     const explain = buildExplain("ct", [declaring, blocked]);
     const explained = explain.rounds.find((round) => round.round === 2);
@@ -324,11 +321,10 @@ describe("contract_transition — superseded closure", () => {
     const finalized = finalizeStopReason(
       "completed",
       makeSelfEvaluation({
-        success: true,
+        outcome: "success",
         output_summary: "redirect",
         constraint_violations: [],
         should_continue: false,
-        contract_transition: TRANSITION,
       }),
       undefined,
       TRANSITION,
@@ -345,19 +341,19 @@ describe("contract_transition — superseded closure", () => {
 import { verifySelfEvaluation, CHECK_CONTRACT_ITEMS_UNVERIFIED } from "../verification-gate.js";
 import { resetPolicy, setPolicyForTest, DEFAULT_POLICY } from "../policy.js";
 
-describe("contract_transition — verification debt", () => {
+describe("supersedes — verification debt", () => {
   beforeEach(() => resetPolicy());
 
   function redirectEvaluation(claimsMet: boolean): SelfEvaluation {
     return makeSelfEvaluation({
-      success: false,
+      outcome: "failed",
       output_summary: "redirect",
       constraint_violations: [],
       should_continue: true,
-      contract_transition: TRANSITION,
+      round_contract: { ...SUCCESSOR, supersedes: TRANSITION },
       execution_report: makeExecutionReport({
-        contract_item_claims: claimsMet
-          ? [{ item_id: ITEM_ID, outcome: "met" }]
+        claims: claimsMet
+          ? [{ id: ITEM_ID, outcome: "met" }]
           : [],
       }),
     });
@@ -413,7 +409,7 @@ import { MemoryLoopStore, installTestCommandProvider, toolNext } from "./_helper
 import { SessionManager } from "../mcp/session.js";
 import { TOOL_HANDLERS } from "../mcp/tools.js";
 
-describe("contract_transition — MCP end-to-end", () => {
+describe("supersedes — MCP end-to-end", () => {
   let store: MemoryLoopStore;
   let mgr: SessionManager;
 
@@ -435,7 +431,7 @@ describe("contract_transition — MCP end-to-end", () => {
     const heldRound1 = mgr.get(sessionId)!.roundSnapshot!;
 
     const declaration = {
-      success: false,
+      outcome: "failed",
       output_summary: "Sliced the work",
       constraint_violations: [],
       should_continue: true,
@@ -453,16 +449,17 @@ describe("contract_transition — MCP end-to-end", () => {
 
     const heldRound2 = mgr.get(sessionId)!.roundSnapshot!;
     const successorEvaluation = {
-      success: false,
+      outcome: "failed",
       output_summary: "The auth slice is not the route",
       constraint_violations: [],
       should_continue: true,
-      contract_transition: {
-        kind: "supersede",
-        contract_id: "rc-99999999",
-        reason: "stale target",
+      round_contract: {
+        ...SUCCESSOR,
+        supersedes: {
+          contract_id: "rc-99999999",
+          reason: "stale target",
+        },
       },
-      round_contract: SUCCESSOR,
     };
     const stale = await toolNext(mgr, {
       sessionId,
@@ -473,7 +470,7 @@ describe("contract_transition — MCP end-to-end", () => {
     assert.equal(stale.error, "contract_invalid");
     const details = stale.details as { contract_errors?: Array<{ reason: string }> };
     assert.ok(details.contract_errors?.some((error) =>
-      error.reason === "transition_target_mismatch"));
+      error.reason === "supersede_target_mismatch"));
 
     // The invalid attempt wrote nothing and the same anchors still work.
     const stillHeld = mgr.get(sessionId)!.roundSnapshot!;
@@ -486,20 +483,22 @@ describe("contract_transition — MCP end-to-end", () => {
       output: "",
       evaluation: {
         ...successorEvaluation,
-        contract_transition: {
-          kind: "supersede",
-          contract_id: e2eContractId,
-          reason: TRANSITION.reason,
+        round_contract: {
+          ...SUCCESSOR,
+          supersedes: {
+            contract_id: e2eContractId,
+            reason: TRANSITION.reason,
+          },
         },
       },
     });
     assert.equal(redirect.error, undefined);
     assert.equal(redirect.prompt !== null, true);
     const receipt = redirect.submission_receipt as {
-      effects: { contract: { superseded?: boolean; transition_reason?: string; before_id: string; after_id: string } };
+      effects: { contract: { superseded?: boolean; redirect_reason?: string; before_id: string; after_id: string } };
     };
     assert.equal(receipt.effects.contract.superseded, true);
-    assert.equal(receipt.effects.contract.transition_reason, TRANSITION.reason);
+    assert.equal(receipt.effects.contract.redirect_reason, TRANSITION.reason);
     assert.equal(receipt.effects.contract.before_id, e2eContractId);
     assert.equal(receipt.effects.contract.after_id, e2eSuccessorId);
 
@@ -518,8 +517,7 @@ describe("contract_transition — MCP end-to-end", () => {
     const replay = mgr.replayTimeline(sessionId) ?? [];
     const replayed = replay.find((entry) => entry.round === 2) as Record<string, unknown>;
     assert.deepEqual(replayed.contract_redirect, {
-      kind: "supersede",
-      contract_id: e2eContractId,
+            contract_id: e2eContractId,
       reason: TRANSITION.reason,
     });
 

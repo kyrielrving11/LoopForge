@@ -17,8 +17,8 @@
     "SelfEvaluation": {
       "type": "object",
       "properties": {
-        "success": {
-          "type": "boolean"
+        "outcome": {
+          "$ref": "#/$defs/RoundOutcome"
         },
         "output_summary": {
           "type": "string"
@@ -89,30 +89,8 @@
             "$ref": "#/$defs/WorkerResult"
           }
         },
-        "agent_stop_reason": {
-          "anyOf": [
-            {
-              "type": "string",
-              "enum": [
-                "gave_up"
-              ]
-            },
-            {
-              "type": "string",
-              "enum": [
-                "blocked"
-              ]
-            },
-            {
-              "type": "string",
-              "enum": [
-                "needs_human_input"
-              ]
-            }
-          ]
-        },
-        "outcome": {
-          "$ref": "#/$defs/RoundOutcome"
+        "objective_refinement": {
+          "type": "string"
         },
         "blocker": {
           "type": "string"
@@ -146,18 +124,15 @@
         },
         "round_contract": {
           "$ref": "#/$defs/RoundContractProposal"
-        },
-        "contract_transition": {
-          "$ref": "#/$defs/ContractTransition"
         }
       },
       "required": [
-        "success",
+        "outcome",
         "output_summary",
         "constraint_violations",
         "should_continue"
       ],
-      "description": "Structured self-evaluation submitted at the round boundary.\r\nThe agent outputs this after completing each round.\r\nEvery field is consumed by at least one downstream function.\r\n\r\nv1.4 (P0–P2): Three new optional fields enable cognitive evolution.\r\nv1.5 (P4–P5): Execution evidence, progress tracking, and self-correction.\r\n\r\nOptional fields are normalized leniently and never dropped silently: the\r\nnormalizer returns stable diagnostics for every correction, and a committed\r\ntransaction persists them with the submitted-field manifest. Four fields\r\nare structural exceptions validated BEFORE the round advances —\r\n`subgoal_updates`, `round_contract`, `contract_transition`, and\r\n`execution_report.contract_item_claims` — because each references the exact\r\nderived set the Agent was shown. `scope` is deliberately not structural:\r\noptional, report-only intent, normalized leniently and never rejected."
+      "description": "Structured self-evaluation submitted at the round boundary.\r\nThe agent outputs this after completing each round.\r\nEvery field is consumed by at least one downstream function.\r\n\r\nv1.4 (P0–P2): Three new optional fields enable cognitive evolution.\r\nv1.5 (P4–P5): Execution evidence, progress tracking, and self-correction.\r\n\r\nv4.0.6: `outcome` is the ONE round conclusion (it replaces `success` and\r\n`agent_stop_reason`); `execution_report.claims` is the ONE claims channel\r\n(it replaces `criterion_claims` + `contract_item_claims`); `round_contract`\r\nis the ONE contract channel (an optional `supersedes` modifier replaces\r\n`contract_transition`). The required field set is still exactly four:\r\n`outcome`, `output_summary`, `constraint_violations`, `should_continue`.\r\n\r\nOptional fields are normalized leniently and never dropped silently: the\r\nnormalizer returns stable diagnostics for every correction, and a committed\r\ntransaction persists them with the submitted-field manifest. Two fields are\r\nstructural exceptions validated BEFORE the round advances —\r\n`subgoal_updates` and `round_contract` (including its `supersedes` and the\r\n`rci-` entries of `execution_report.claims`) — because each references the\r\nexact derived set the Agent was shown. `scope` is deliberately not\r\nstructural: optional, report-only intent, normalized leniently and never\r\nrejected.\r\n\r\n`objective_refinement` evolves the OVERALL starting objective (the working\r\nversion of `OperatorAcceptance.task`), not the current round's slice. It is\r\nevent-driven and never changes criteria or hard constraints."
     },
     "CheckpointRole": {
       "type": "string",
@@ -954,29 +929,10 @@
             }
           ]
         },
-        "agent_stop_reason": {
-          "anyOf": [
-            {
-              "type": "string",
-              "enum": [
-                "gave_up"
-              ]
-            },
-            {
-              "type": "string",
-              "enum": [
-                "blocked"
-              ]
-            },
-            {
-              "type": "string",
-              "enum": [
-                "needs_human_input"
-              ]
-            },
-            {
-              "type": "null"
-            }
+        "objective_refinement": {
+          "type": [
+            "string",
+            "null"
           ]
         },
         "loop_stop_reason": {
@@ -1077,7 +1033,7 @@
                 "superseded": {
                   "type": "boolean"
                 },
-                "transition_reason": {
+                "redirect_reason": {
                   "type": "string"
                 }
               },
@@ -1528,6 +1484,50 @@
         "contract_verification_available": {
           "type": "boolean"
         },
+        "contract_requirement": {
+          "type": "object",
+          "properties": {
+            "required_on_continue": {
+              "type": "boolean"
+            },
+            "successor_required_if_closed": {
+              "type": "boolean"
+            },
+            "reason": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "enum": [
+                    "no_active_contract"
+                  ]
+                },
+                {
+                  "type": "string",
+                  "enum": [
+                    "active_contract_continues"
+                  ]
+                },
+                {
+                  "type": "string",
+                  "enum": [
+                    "no_contract_capability"
+                  ]
+                }
+              ]
+            },
+            "active_contract_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "required_on_continue",
+            "successor_required_if_closed",
+            "reason"
+          ]
+        },
         "subgoals": {
           "type": "array",
           "items": {
@@ -1764,6 +1764,7 @@
       "required": [
         "contract_commands",
         "contract_verification_available",
+        "contract_requirement",
         "subgoals",
         "criteria",
         "prompt",
@@ -2257,6 +2258,7 @@
       "required": [
         "round",
         "agentSuccessClaim",
+        "agentOutcome",
         "output_summary",
         "constraint_violations"
       ]
@@ -2269,9 +2271,6 @@
         },
         "round": {
           "type": "number"
-        },
-        "goal_id": {
-          "type": "string"
         },
         "task": {
           "type": "string"
@@ -2335,7 +2334,6 @@
       "required": [
         "loop_id",
         "round",
-        "goal_id",
         "task",
         "constraints_from_plan",
         "force_level",
@@ -2626,7 +2624,7 @@
       "properties": {
         "schemaVersion": {
           "type": "number",
-          "const": 11
+          "const": 12
         },
         "roundId": {
           "type": "string"
@@ -3061,51 +3059,19 @@
             "type": "string"
           }
         },
-        "tests_reported": {
-          "anyOf": [
-            {
-              "type": "object",
-              "properties": {
-                "passed": {
-                  "type": "number"
-                },
-                "failed": {
-                  "type": "number"
-                },
-                "skipped": {
-                  "type": "number"
-                }
-              },
-              "required": [
-                "passed",
-                "failed",
-                "skipped"
-              ]
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "criterion_claims": {
+        "claims": {
           "type": "array",
           "items": {
-            "$ref": "#/$defs/CriterionClaim"
-          }
-        },
-        "contract_item_claims": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/ContractItemClaim"
+            "$ref": "#/$defs/ExecutionClaim"
           }
         }
       },
-      "description": "v3.8: The agent's self-report for a round — renamed from ExecutionReport\r\nbecause these fields are claims, not evidence. The whole object is\r\noptional; a mistyped optional field is dropped with a warning and never\r\nrejects the round."
+      "description": "v3.8 / v4.0.6: The agent's self-report for a round. These fields are\r\nclaims, not evidence. The whole object is optional; a mistyped optional\r\nfield is dropped with a warning and never rejects the round."
     },
-    "CriterionClaim": {
+    "ExecutionClaim": {
       "type": "object",
       "properties": {
-        "criterion_id": {
+        "id": {
           "type": "string"
         },
         "outcome": {
@@ -3126,39 +3092,10 @@
         }
       },
       "required": [
-        "criterion_id",
+        "id",
         "outcome"
       ],
-      "description": "v3.8: An advisory claim about an objective criterion. Lenient by design —\r\nthe criterion layer is advisory; the contract item layer is the machine\r\nverification skeleton."
-    },
-    "ContractItemClaim": {
-      "type": "object",
-      "properties": {
-        "item_id": {
-          "type": "string"
-        },
-        "outcome": {
-          "anyOf": [
-            {
-              "type": "string",
-              "enum": [
-                "met"
-              ]
-            },
-            {
-              "type": "string",
-              "enum": [
-                "remaining"
-              ]
-            }
-          ]
-        }
-      },
-      "required": [
-        "item_id",
-        "outcome"
-      ],
-      "description": "v3.8: A claim about an ACTIVE contract item, cited by the derived\r\nrci-XXXXXXXX id the prompt rendered."
+      "description": "v4.0.6: ONE claim entry. The id prefix routes strictness: `cr-` is an\r\nadvisory criterion claim; `rci-` is a strict active-contract item claim.\r\nA claim NEVER verifies anything — only machine observation can."
     },
     "ContractItemProposal": {
       "type": "object",
@@ -3181,7 +3118,6 @@
       },
       "required": [
         "description",
-        "criterion_refs",
         "verify_with"
       ],
       "description": "v3.8/v3.9.5: One acceptance condition inside a Round Contract slice.\r\n`description` states what must be true, not an activity. `verify_with`\r\nmust name configured, enabled, after-capable evidence commands — the\r\ndeclaration is strict. A command may back several conditions, and one\r\ncondition may bind several commands."
@@ -3198,6 +3134,9 @@
             "type": "string"
           }
         },
+        "supersedes": {
+          "$ref": "#/$defs/ContractSupersede"
+        },
         "items": {
           "type": "array",
           "items": {
@@ -3210,15 +3149,9 @@
       ],
       "description": "A contract PROPOSAL carried by one evaluation. Three related objects must\r\nnot be conflated:\r\n- the proposal: this object, for the NEXT round;\r\n- the ACTIVE contract: the proposal once its declaring round commits,\r\n  governing the round that follows;\r\n- `work_item`: the bounded deliverable that becomes the prompt's\r\n  `Current Task` while the contract is active.\r\nThe proposal is never the contract of the round that declared it."
     },
-    "ContractTransition": {
+    "ContractSupersede": {
       "type": "object",
       "properties": {
-        "kind": {
-          "type": "string",
-          "enum": [
-            "supersede"
-          ]
-        },
         "contract_id": {
           "type": "string"
         },
@@ -3227,10 +3160,9 @@
         }
       },
       "required": [
-        "kind",
         "contract_id"
       ],
-      "description": "v3.9.9: an explicit, one-way redirection of the ACTIVE Round Contract.\r\nThe target id binds the transition to the exact contract the Agent saw, so\r\na stale prompt cannot close a different contract. A legal transition\r\nalways carries the successor proposal in the same evaluation."
+      "description": "v4.0.6: the redirect modifier of a Round Contract proposal. It replaces the\r\nformer standalone `contract_transition` field."
     },
     "ContractBinding": {
       "type": "object",

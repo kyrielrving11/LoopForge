@@ -247,7 +247,7 @@ describe("derivePromptFreshness", () => {
       evaluation: {
         execution_report: {
           files_changed: ["reported.ts"],
-          tests_reported: { passed: 1, failed: 0, skipped: 0 },
+
         },
       },
     }));

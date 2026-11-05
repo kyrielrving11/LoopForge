@@ -141,7 +141,7 @@ describe("v3.9.1 — FIELD_GUIDES and tool schema", () => {
 describe("v3.9.1 — submitted-field manifest", () => {
   it("lists known present paths and excludes unknown fields", () => {
     const paths = submittedFieldPaths({
-      success: true,
+      outcome: "success",
       output_summary: "done",
       constraint_violations: [],
       should_continue: false,
@@ -149,13 +149,13 @@ describe("v3.9.1 — submitted-field manifest", () => {
       progress_estimate: 0.5,
     });
     assert.ok(paths.includes("execution_report.files_changed"));
-    assert.ok(paths.includes("success"));
+    assert.ok(paths.includes("outcome"));
     assert.ok(!paths.includes("progress_estimate"));
   });
 
   it("separates unknown top-level and execution_report keys", () => {
     assert.deepEqual(
-      unknownTopLevelFields({ success: true, progress_estimate: 1, next_action: "x" }),
+      unknownTopLevelFields({ outcome: "success", progress_estimate: 1, next_action: "x" }),
       ["next_action", "progress_estimate"],
     );
     assert.deepEqual(
@@ -182,6 +182,40 @@ describe("v3.9.1 — submission_guidance", () => {
       "a first contract declaration is offered when a command exists");
   });
 
+  it("v4.0.6: projects the contract requirement from the shared rule", () => {
+    withVerifyCommand();
+    const first = deriveSubmissionGuidance(sessionView(), { rounds: [] });
+    assert.deepEqual(first.contract_requirement, {
+      required_on_continue: true,
+      successor_required_if_closed: false,
+      reason: "no_active_contract",
+      active_contract_id: null,
+    });
+
+    const view = decodeCommittedRound(committedFeedbackRound(1, {
+      loopId: "guidance-loop",
+      contract: CONTRACT,
+    }));
+    assert.ok(view, "committed round decodes");
+    const active = deriveSubmissionGuidance(sessionView(), { rounds: [view!] });
+    assert.equal(active.contract_requirement.required_on_continue, false);
+    assert.equal(active.contract_requirement.successor_required_if_closed, true);
+    assert.equal(active.contract_requirement.reason, "active_contract_continues");
+    assert.equal(
+      active.contract_requirement.active_contract_id,
+      active.active_contract?.id,
+    );
+
+    resetPolicy();
+    const noCapability = deriveSubmissionGuidance(sessionView(), { rounds: [] });
+    assert.deepEqual(noCapability.contract_requirement, {
+      required_on_continue: false,
+      successor_required_if_closed: false,
+      reason: "no_contract_capability",
+      active_contract_id: null,
+    });
+  });
+
   it("renders real active-contract item ids and real sub-goal ids", () => {
     withVerifyCommand();
     const subGoalText = "a real sub-goal";
@@ -202,7 +236,7 @@ describe("v3.9.1 — submission_guidance", () => {
     assert.deepEqual(guidance.active_contract?.items.map((item) => item.id), itemIds);
     assert.deepEqual(guidance.subgoals.map((item) => item.id), [subGoalId]);
     const claim = guidance.fields.find(
-      (field) => field.path === "execution_report.contract_item_claims",
+      (field) => field.path === "execution_report.claims",
     );
     assert.ok(claim?.example, "claim example exists");
     assert.ok(JSON.stringify(claim!.example).includes(itemIds[0]),
@@ -289,23 +323,25 @@ describe("v3.9.2 — compact trigger guidance", () => {
   });
 
   it("applies the semantic applicability rules", () => {
-    assert.equal(isFieldApplicable("execution_report.criterion_claims", facts()), false);
+    assert.equal(isFieldApplicable("execution_report.claims", facts()), false);
     assert.equal(
-      isFieldApplicable("execution_report.criterion_claims", facts({ criteria: [criterion] })),
+      isFieldApplicable("execution_report.claims", facts({ criteria: [criterion] })),
+      true,
+    );
+    assert.equal(
+      isFieldApplicable("execution_report.claims", facts({ activeContract })),
       true,
     );
     assert.equal(isFieldApplicable("round_contract", facts()), true);
     assert.equal(
       isFieldApplicable("round_contract", facts({ activeContract })),
-      false,
+      true,
+      "the contract channel stays usable while a contract is active",
     );
     assert.equal(isFieldApplicable("round_contract", facts({ commands: [] })), false);
     assert.equal(isFieldApplicable("no_change_reason", facts()), false);
     assert.equal(isFieldApplicable("no_change_reason", facts({ commands: [] })), true);
-    assert.equal(
-      isFieldApplicable("execution_report.contract_item_claims", facts({ activeContract })),
-      true,
-    );
+
     assert.equal(isFieldApplicable("subgoal_updates", facts({ subGoals: [doneSubGoal] })), false);
     assert.equal(isFieldApplicable("subgoal_updates", facts({ subGoals: [activeSubGoal] })), true);
     assert.equal(isFieldApplicable("gate_ids", facts({ gateEnabled: true })), true);
@@ -315,7 +351,8 @@ describe("v3.9.2 — compact trigger guidance", () => {
   it("keeps one level-independent compact subset", () => {
     const compact = promptedFieldPaths(facts({ criteria: [criterion] }));
     assert.deepEqual(compact, [
-      "execution_report.criterion_claims",
+      "execution_report.claims",
+      "objective_refinement",
       "discovered_constraints",
       "wrong_assumptions",
       "open_questions",
@@ -324,13 +361,13 @@ describe("v3.9.2 — compact trigger guidance", () => {
       "worker_results",
       "subtask_boundary",
     ]);
-    assert.ok(compact.length <= 8, "the compact checklist is structurally max eight");
+    assert.ok(compact.length <= 9, "the compact checklist is structurally max nine");
     assert.equal(isFieldPrompted("round_contract", facts()), false,
       "the dedicated contract renderer owns this field");
     assert.equal(isFieldPrompted("subgoal_updates", facts({ subGoals: [activeSubGoal] })), false,
       "the dedicated sub-goal renderer owns this field");
-    assert.equal(isFieldPrompted("execution_report.contract_item_claims", facts({ activeContract })), false,
-      "the dedicated contract-item renderer owns this field");
+    assert.equal(isFieldPrompted("execution_report.claims", facts({ activeContract })), true,
+      "claims stay a compact opportunity while a contract is active");
   });
 
   it("uses a real criterion id and text, never the old placeholder", () => {
@@ -342,11 +379,11 @@ describe("v3.9.2 — compact trigger guidance", () => {
       criteria: [criterion],
     };
     assert.deepEqual(
-      fieldExample("execution_report.criterion_claims", ctx),
-      [{ criterion_id: "cr-12345678", outcome: "met" }],
+      fieldExample("execution_report.claims", ctx),
+      [{ id: "cr-12345678", outcome: "met" }],
     );
     assert.equal(
-      fieldExample("execution_report.criterion_claims", { ...ctx, criteria: [] }),
+      fieldExample("execution_report.claims", { ...ctx, criteria: [] }),
       null,
     );
   });
@@ -370,7 +407,7 @@ describe("v3.9.2 — compact trigger guidance", () => {
     assert.match(block, /cr-12345678/);
     assert.match(block, /All tests pass/);
     assert.doesNotMatch(block, /<criterion text or cr id from the prompt>/);
-    assert.doesNotMatch(block, /`objective_refinement`/);
+    assert.match(block, /`objective_refinement`/);
   });
 
   it("keeps L0's field interface complete while its state body stays lean", () => {
@@ -389,7 +426,7 @@ describe("v3.9.2 — compact trigger guidance", () => {
     };
     const block = renderSelfEvalBlock(ctx);
     for (const path of [
-      "execution_report.criterion_claims",
+      "execution_report.claims",
       "discovered_constraints",
       "wrong_assumptions",
       "open_questions",
@@ -402,6 +439,48 @@ describe("v3.9.2 — compact trigger guidance", () => {
     }
     assert.match(block, /cr-12345678/);
     assert.match(block, /No active Round Contract/);
+  });
+
+  it("v4.0.6: active-contract guidance follows the shared coverage rule", () => {
+    const activeContract = {
+      id: "rc-12345678",
+      declared_at_round: 1,
+      work_item: "Slice A",
+      scope: [],
+      items: [{
+        id: "rci-12345678",
+        description: "works",
+        criterion_refs: [],
+        verify_with: ["verify"],
+      }],
+      config_hash_by_command: {},
+    } as NonNullable<SelfEvalPromptContext["activeContract"]>;
+    const base: SelfEvalPromptContext = {
+      round: 2,
+      level: "l1",
+      activeContract,
+      itemStatuses: null,
+      commands: [],
+      contractVerificationAvailable: false,
+      subGoals: [],
+      verificationFlags: [],
+      recovery: false,
+      gateEnabled: false,
+    };
+    const noCapability = renderSelfEvalBlock(base);
+    assert.match(noCapability,
+      /items cannot be machine-verified this round and no successor is required\./);
+    assert.doesNotMatch(noCapability,
+      /successor `round_contract` is REQUIRED/);
+
+    const withCapability = renderSelfEvalBlock({
+      ...base,
+      commands: ["verify"],
+      contractVerificationAvailable: true,
+    });
+    assert.match(withCapability,
+      /If this round closes the contract \(every item verified\) and you continue,/);
+    assert.match(withCapability, /successor `round_contract` is REQUIRED/);
   });
 
   it("uses schema placeholders instead of seeding a task-specific contract", () => {
@@ -499,8 +578,8 @@ describe("v3.9.2 — compact trigger guidance", () => {
     );
     assert.deepEqual(guidance.criteria, [{ id, text, status: "remaining" }]);
     const field = guidance.fields.find(
-      (entry) => entry.path === "execution_report.criterion_claims");
+      (entry) => entry.path === "execution_report.claims");
     assert.ok(field);
-    assert.deepEqual(field?.example, [{ criterion_id: id, outcome: "met" }]);
+    assert.deepEqual(field?.example, [{ id, outcome: "met" }]);
   });
 });

@@ -162,7 +162,7 @@ describe("Git workspace progress", () => {
 
   it("does not let an Agent report create progress", () => {
     const normalized = normalizeSelfEvaluation({
-      success: false,
+      outcome: "failed",
       output_summary: "nothing",
       constraint_violations: [],
       should_continue: true,

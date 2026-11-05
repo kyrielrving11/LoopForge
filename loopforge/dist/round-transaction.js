@@ -21,11 +21,15 @@ import { transactionIdentityIssue } from "./transaction-identity.js";
  *  checkpoints and the redo restore marker. v4.0.3: schema 7 requires the
  *  persisted `EvidencePosture` on every result and adds the transient
  *  `RetryContext`. v4.0.4: schema 8 embeds the schema-10 PromptArtifact
- *  (`fresh_invocation`) and the renamed `SelfEvaluation.agent_stop_reason`;
- *  schema 7 documents are reported as legacy, never migrated or silently
- *  re-read under the new field name. Unsupported versions are reported by
- *  `legacyTransactionRounds`; there is no compatibility migration. */
-export const ROUND_TRANSACTION_SCHEMA_VERSION = 8;
+ *  (`fresh_invocation`) and the renamed `SelfEvaluation.agent_stop_reason`.
+ *  v4.0.6: schema 9 is a BREAKING shape break — the committed evaluation
+ *  carries a required `outcome`, one `execution_report.claims` channel
+ *  (`cr-`/`rci-`) and `round_contract.supersedes`; `success`,
+ *  `agent_stop_reason`, `contract_transition`, `tests_reported`,
+ *  `criterion_claims` and `contract_item_claims` are gone. Every earlier
+ *  version is reported as legacy by `legacyTransactionRounds`; there is no
+ *  compatibility migration. */
+export const ROUND_TRANSACTION_SCHEMA_VERSION = 9;
 /** Maximum distinct mid-round checkpoints one transaction may reference. */
 export const MAX_MID_CHECKPOINTS_PER_TRANSACTION = 32;
 /** The root branch identity for every loop. */
@@ -470,7 +474,14 @@ export function isRetryContext(value) {
 export function isProcessResult(value) {
     if (!isRecord(value))
         return false;
-    return ["continue", "stop", "reject", "terminate", "backtrack", "recovery"].includes(String(value.action)) && Array.isArray(value.verificationFlags) &&
+    // v4.0.6: every committed decision carries a well-formed Agent outcome
+    // (null only for a rollback directive) and its derived success projection.
+    const outcome = value.agentOutcome;
+    const validOutcome = outcome === null || outcome === "success" ||
+        outcome === "partial" || outcome === "failed" || outcome === "blocked";
+    return ["continue", "stop", "reject", "terminate", "backtrack", "recovery"].includes(String(value.action)) && validOutcome &&
+        typeof value.agentSuccessClaim === "boolean" &&
+        Array.isArray(value.verificationFlags) &&
         value.verificationFlags.every(isVerificationFlag) &&
         isEvidencePosture(value.evidencePosture);
 }

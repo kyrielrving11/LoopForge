@@ -40,7 +40,7 @@ function response(overrides: Partial<LoopCompileResponse> = {}): LoopCompileResp
   return makeLoopCompileResponse({
     loop_id: "test-loop",
     round: 2,
-    goal_id: "goal-1",
+
     loop_objective: makeLoopObjective({
       objective: "Fix bugs in auth module",
       success_criteria: ["all tests pass", "no regressions"],
@@ -215,8 +215,8 @@ describe("createCanonicalLoopState", () => {
       constraint_violations: [],
       execution_report: {
         files_changed: ["a.ts"],
-        tests_reported: { passed: 8, failed: 1, skipped: 0 },
-        criterion_claims: criterionClaims(["c1"], ["c2"]),
+
+        claims: criterionClaims(["c1"], ["c2"]),
       },
     });
     const state = createCanonicalLoopState(request(), response(), "test.md", {
@@ -226,8 +226,11 @@ describe("createCanonicalLoopState", () => {
     assert.ok(md.includes("Progress Dashboard"));
     assert.ok(md.includes("**Agent-reported criteria**: 1/2"));
     assert.ok(!md.includes("Estimated Completion"));
-    assert.ok(md.includes("8 passed"));
-    assert.ok(md.includes("1 failed"));
+    assert.ok(md.includes("**Agent-reported files**"));
+    assert.ok(!md.includes("Tests (Agent report)"),
+      "v4.0.6: no Agent-reported test counts");
+    assert.ok(!md.includes("tests_reported"));
+    assert.equal("tests" in state.reportedProgress, false);
   });
 
   it("v4.0.2: renders the authority header and bounded Working Memory", () => {
@@ -372,7 +375,7 @@ describe("state-file tiering (v3.7.1)", () => {
     const idxHistorical = md.indexOf("## Historical Summary");
     assert.ok(idxCurrent >= 0 && idxRecent > idxCurrent && idxHistorical > idxRecent,
       "tiers must render in order: Current → Recent → Historical Summary");
-    assert.ok(md.includes("**Schema**: 9"), "state schema marker");
+    assert.ok(md.includes("**Schema**: 10"), "state schema marker");
     assert.ok(md.includes("**Derived**: true"), "derived marker in the header");
     assert.ok(md.includes("**Source**: round 2 (attempt 2)"), "attempt marker");
     assert.ok(md.includes("**Authority**: committed typed rounds"));

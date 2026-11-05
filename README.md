@@ -78,7 +78,7 @@ omitting it makes the prompt state that no instruction was provided instead of
 inferring one from older text.
 
 Round results keep three kinds of facts separate: the Agent report
-(`agent_stop_reason` among its claims), the LoopForge decision
+(`success_claim`, `outcome`, `blocker`), the LoopForge decision
 (`loop_stop_reason`), and the persisted Machine evidence. Explain, terminal
 stop output and `resume` of a stopped loop render the same three blocks;
 `completed` never implies machine-backed success.
@@ -104,12 +104,23 @@ Contract: a deliverable, acceptance conditions, and commands to check them.
 LoopForge validates the structure and command bindings. An item is verified
 when the agent claims it is met and its bound commands pass in the closing
 round with the declared binding. A later command disable or reconfigure does
-not rewrite a historical pass, and Agent-reported test counts never upgrade a
-criterion claim. Whether the proposed deliverable or test is semantically
-appropriate remains the agent's and operator's judgment. The agent's declared `scope` is a
-report-only intent, not a permission, and an active slice can be explicitly
-redirected with `contract_transition`; the old contract then closes as
-`superseded` and stays visible in the audit record.
+not rewrite a historical pass, and only command observations are test facts —
+there is no Agent-reported test count. Whether the proposed deliverable or test
+is semantically appropriate remains the agent's and operator's judgment. With
+an after-capable command, a continuing round must leave an ACTIVE contract for
+the next round: omit the proposal to continue it, declare the next slice, or
+replace it with `round_contract.supersedes` and different acceptance items. The
+old contract closes as `superseded` and stays visible in the audit record. The
+agent's declared `scope` is a report-only intent, not a permission, and never
+participates in contract identity.
+
+Criterion and contract-item claims share one `execution_report.claims` channel:
+entries cite a `cr-` criterion id (advisory) or an `rci-` active-contract item
+id (strict). A claim never verifies anything by itself. The overall working
+objective can evolve through an event-driven `objective_refinement`; it changes
+only the objective text used by the next prompt and goalId, never Operator
+Acceptance, success criteria or hard constraints. Omit it when the objective is
+unchanged.
 
 ## Recovery with the agent in control
 

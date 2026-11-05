@@ -42,9 +42,13 @@ class CountingSessionStore extends VaultSessionStateStore {
 }
 
 const partialEval = () => makeSelfEvaluation({
-  success: false,
+  outcome: "failed",
   output_summary: "partial",
   should_continue: true,
+  round_contract: {
+    work_item: "handle slice",
+    items: [{ description: "handle acceptance", verify_with: ["verify"] }],
+  },
 });
 
 describe("v4.0.0 submission-handle boundary", () => {
@@ -264,14 +268,14 @@ describe("v4.0.0 submission-handle boundary", () => {
     const started = await mgr.create({ task: "Rejection rotation", loopId: "handle-reject" });
     const current = started.submissionHandle!;
     const rejected = await mgr.advance(current, "", {
-      success: true,
+      outcome: "success",
       output_summary: "Claimed success while admitting a violation.",
       constraint_violations: ["Do not break the public API"],
-      should_continue: true,
+      should_continue: false,
       execution_report: {
         files_changed: [],
-        tests_reported: { passed: 0, failed: 0, skipped: 0 },
-        criterion_claims: criterionClaims([], [DEFAULT_SUCCESS_CRITERION]),
+
+        claims: criterionClaims([], [DEFAULT_SUCCESS_CRITERION]),
       },
     });
 

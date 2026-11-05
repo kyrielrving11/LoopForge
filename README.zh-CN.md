@@ -42,11 +42,13 @@ Agent 报告描述它认为发生了什么，但报告本身不是证明。LoopF
 
 `loopforge_next` 和 `loopforge_resume` 接受可选的 `currentUserInstruction`。它是本次 invocation 的宿主输入，不会改写 loop 的 task、objective、验收标准、约束或 Round Contract；不传时 prompt 会明确写“本次未提供”，不会从旧文本推断。
 
-轮次结果把三类事实分开呈现：Agent 报告（含 `agent_stop_reason`）、LoopForge 处置（`loop_stop_reason`）和持久化的 Machine evidence。Explain、终态 `stopDetail` 以及 `resume` 已停止 loop 使用同一组事实块；`completed` 表示 Agent 的停止声明通过了 gate，不代表机器背书的任务成功。
+轮次结果把三类事实分开呈现：Agent 报告（`success_claim`、`outcome`、`blocker`）、LoopForge 处置（`loop_stop_reason`）和持久化的 Machine evidence。`outcome` 是唯一的回合结论；`success` 必须停止，`blocked` 必须停止并提供 `blocker`。Explain、终态 `stopDetail` 以及 `resume` 已停止 loop 使用同一组事实块；`completed` 表示 Agent 的停止声明通过了 gate，不代表机器背书的任务成功。
 
 连续性可以由有界 Working Memory 补充。它只从当前分支的已提交轮次和 rollback directive 派生，包含近期报告、被证伪的假设与撤回、未闭合问题、已消费的恢复事件和契约转向。来源窗口与各类条目上限是固定代码常量，不由 policy 配置。L1 和 L2 使用相同的固定窗口，L0 保持紧凑。默认 prompt 字符上限分别为 L0 5,000、L1 50,000、L2 100,000。这些是安全上限，不是日常裁剪记忆的目标。Working Memory 是一个不可拆分的可选段落；提示空间不足时会整体省略，prompt artifact 会记录省略状态和计数。它由唯一 canonical 认知状态派生，不是第二套历史或独立 memory store，Agent 报告也不会进入验证 gate。Machine Evidence（provider、command 状态和已验证契约项）单独作为受保护段落呈现，并参与验证判断。更早历史通过 `loopforge_replay` 或 `loopforge_status view: "explain"` 主动检索。
 
-对于适合有界分片的工作，Agent 可以提出 Round Contract：一个交付物、验收条件，以及用于检查这些条件的命令。LoopForge 校验契约结构和命令绑定。只有 Agent 声明条目满足，且关闭轮次中的绑定命令在声明的 binding 下通过，条目才会标记为已验证。之后命令被 disable 或 reconfigure 不会重写历史通过结论；Agent 自报的测试数量也不会把 criterion claim 升级为 verified。交付物或测试在语义上是否合适，仍由 Agent 和操作者判断。Agent 声明的 `scope` 只是报告用的意图，不是权限；当前分片确实不再合适时，可以用 `contract_transition` 显式改向，旧契约以 `superseded` 关闭并继续保留在审计记录中。
+对于适合有界分片的工作，Agent 可以提出 Round Contract：一个交付物、验收条件，以及用于检查这些条件的命令。LoopForge 校验契约结构和命令绑定。只有 Agent 声明条目满足，且关闭轮次中的绑定命令在声明的 binding 下通过，条目才会标记为已验证。之后命令被 disable 或 reconfigure 不会重写历史通过结论；只有命令观察才是测试事实，不存在 Agent 自报的测试计数。交付物或测试在语义上是否合适，仍由 Agent 和操作者判断。只要配置了 after-capable 命令，继续轮必须为下一轮留下活动合同：省略提案表示继续当前合同，声明新提案表示开始下一分片，也可以用 `round_contract.supersedes` 显式替换。旧契约以 `superseded` 关闭并继续保留在审计记录中。Agent 声明的 `scope` 只是报告用的意图，不是权限，也不参与合同身份。
+
+criterion 与 contract item 的声明共用一个 `execution_report.claims` 通道：条目引用 `cr-` criterion id（advisory）或当前活动合同的 `rci-` item id（strict）。claim 本身永远不能把任何东西变成已验证。整体工作目标可以通过事件驱动的 `objective_refinement` 演进；它只改变下一轮 prompt 和 goalId 使用的工作目标文本，永远不改 Operator Acceptance、成功标准或硬约束。目标没有变化时省略该字段。
 
 ## 由 Agent 主导的恢复
 

@@ -13,10 +13,12 @@ import type { WorkingMemory } from "./working-memory.js";
  *  reported progress/issues/warnings, compile context and Working Memory
  *  source counts. v4.0.4: schema 8 records the renamed context vocabulary
  *  (`fresh_invocation`) in the derived declaration and stateHash. v4.0.5:
- *  schema 9 adds the optional `currentUserInstruction` projection. The state
+ *  schema 9 adds the optional `currentUserInstruction` projection; schema 10
+ *  (v4.0.6) makes the objective the WORKING objective, falls back to it for
+ *  the Current Task, and removes the Agent-reported test counts. The state
  *  file is regenerated every round; an older file is a stale view, not a
  *  legacy document to decode. */
-export declare const CANONICAL_STATE_SCHEMA_VERSION: 9;
+export declare const CANONICAL_STATE_SCHEMA_VERSION: 10;
 /** v4.0.5: the ONE wording for "the host supplied no instruction". Prompt and
  *  state file both render it; neither infers an instruction from the old task
  *  or transcript. */
@@ -134,11 +136,6 @@ export interface CanonicalLoopState {
         /** The same claim set, named for the state-file "remaining" section. */
         agentReportedRemaining: string[];
         filesChanged: string[];
-        tests: {
-            passed: number;
-            failed: number;
-            skipped: number;
-        } | null;
     };
     /** v4.0.3: stable `oq-` ids the last committed round reported as resolved.
      *  Agent report — display only; Working Memory removes the matching open

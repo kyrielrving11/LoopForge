@@ -1,4 +1,4 @@
-/** v4.0.4: the ONE presentation of a round's result facts.
+/** v4.0.4 / v4.0.6: the ONE presentation of a round's result facts.
  *
  *  Three kinds of facts stay separate and always appear in this order:
  *    1. Agent report   — what the Agent claimed (never machine evidence).
@@ -9,6 +9,11 @@
  *  This module derives nothing. It formats facts that were already committed
  *  or are already computed by the runtime; it never re-derives `completed`,
  *  `machineBackedSuccess` or a "conflict"/"verdict" boolean.
+ *
+ *  v4.0.6: `outcome` is always declared (there is no `success`-derived
+ *  branch), so the `outcomeDeclared` projection and the Agent stop-reason
+ *  field are gone; the Agent's blocker text replaces that report detail.
+ *  The success claim remains a derived read projection.
  */
 import { formatEvidencePostureLines } from "./evidence-posture-view.js";
 /** Neutral fact statements. They describe the committed trigger; they never
@@ -28,12 +33,12 @@ const LOOP_STOP_REASON_FACTS = {
 function booleanText(value) {
     return value === null ? "not available" : String(value);
 }
-function outcomeText(facts) {
-    if (facts.outcome === null)
-        return "not available";
-    if (facts.outcomeDeclared !== null)
-        return `${facts.outcome} (declared)`;
-    return `${facts.outcome} (derived; declared: none)`;
+/** Render the Agent's blocker as one fact line. A committed blocker is
+ *  already normalized to ≤500 chars; collapse newlines so the block keeps
+ *  its one-fact-per-line shape. */
+function blockerText(blocker) {
+    const text = blocker?.replace(/\s+/g, " ").trim() ?? "";
+    return text.length > 0 ? text : "none";
 }
 /** Render the three fact blocks. The caller owns any heading above them.
  *  `density` selects the shared posture renderer's compact form for terminal
@@ -47,9 +52,9 @@ export function renderResultFacts(facts, density) {
     }
     else {
         lines.push(`  success_claim: ${booleanText(facts.agent.successClaim)}`);
-        lines.push(`  outcome: ${outcomeText(facts.agent)}`);
+        lines.push(`  outcome: ${facts.agent.outcome ?? "not available"}`);
         lines.push(`  should_continue: ${booleanText(facts.agent.shouldContinue)}`);
-        lines.push(`  agent_stop_reason: ${facts.agent.agentStopReason ?? "none"}`);
+        lines.push(`  blocker: ${blockerText(facts.agent.blocker)}`);
     }
     lines.push("", "LoopForge decision");
     lines.push(`  action: ${facts.loopforge.action}`);

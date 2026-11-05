@@ -21,14 +21,17 @@ const workspace = mkdtempSync(join(tmpdir(), "loopforge-real-fields-"));
 const modelSchema = join(workspace, "evaluation.schema.json");
 writeFileSync(modelSchema, JSON.stringify({
   type: "object",
-  required: ["success", "output_summary", "constraint_violations", "should_continue"],
+  required: ["outcome", "output_summary", "constraint_violations", "should_continue"],
   properties: {
-    success: { type: "boolean" }, output_summary: { type: "string" },
+    outcome: { type: "string", enum: ["success", "partial", "failed", "blocked"] },
+    output_summary: { type: "string" },
     constraint_violations: { type: "array", items: { type: "string" } }, should_continue: { type: "boolean" },
     discovered_constraints: { type: "array", items: { type: "string" } },
     emerged_subtasks: { type: "array", items: { type: "string" } },
     wrong_assumptions: { type: "array", items: { type: "string" } },
-    execution_report: { type: "object" }, criterion_claims: { type: "array" }, outcome: { type: "string" },
+    objective_refinement: { type: "string" },
+    blocker: { type: "string" },
+    execution_report: { type: "object" }, round_contract: { type: "object" },
   }, additionalProperties: true,
 }), "utf8");
 const loopId = `real-fields-${Date.now()}`;
@@ -125,7 +128,7 @@ function extract(result: Json): Json {
 
 function fields(evaluation: Json | null): string[] {
   if (!evaluation) return [];
-  return ["discovered_constraints", "wrong_assumptions", "emerged_subtasks", "subgoal_updates", "worker_results", "round_contract", "criterion_claims", "execution_report", "outcome", "prompt_requests"]
+  return ["discovered_constraints", "wrong_assumptions", "emerged_subtasks", "subgoal_updates", "worker_results", "round_contract", "execution_report", "objective_refinement", "outcome", "blocker"]
     .filter((key) => evaluation[key] !== undefined);
 }
 

@@ -79,7 +79,8 @@ export function buildExplain(loopId, entries, round, legacyRounds = 0) {
         const retracted = clipList(view.retractedConstraints, 500);
         const questions = clipList(view.openQuestions, 300);
         const blocker = clip(view.evaluation?.blocker, 500);
-        const redirectReason = clip(view.contractTransition?.reason, 500);
+        const redirectReason = clip(view.contractRedirect?.reason, 500);
+        const objectiveRefinement = clip(view.objectiveRefinement, 1000);
         const constraintViolations = clipList(view.constraintViolations, 500);
         const discoveredConstraints = clipList(view.discoveredConstraints, 500);
         const emergedSubtasks = clipList(view.emergedSubtasks, 500);
@@ -129,8 +130,6 @@ export function buildExplain(loopId, entries, round, legacyRounds = 0) {
             loopStopReason: view.result?.stopReason ?? null,
             agentSuccessClaim: view.agentSuccessClaim,
             agentOutcome: view.agentOutcome,
-            agentOutcomeDeclared: view.evaluation?.outcome ?? null,
-            agentStopReason: view.evaluation?.agent_stop_reason ?? null,
             agentShouldContinue: view.evaluation?.should_continue ?? null,
             evidencePosture: view.evidencePosture,
             enforcementReason: view.result?.enforcementReason ?? null,
@@ -146,14 +145,10 @@ export function buildExplain(loopId, entries, round, legacyRounds = 0) {
                     output_summary: reportText.text,
                     no_change_reason: noChange.text || null,
                     subtask_boundary_label: subtaskLabel.text || null,
-                    criterion_claims: (view.executionReport?.criterion_claims ?? [])
+                    objective_refinement: objectiveRefinement.text || null,
+                    claims: (view.executionReport?.claims ?? [])
                         .map((claim) => ({
-                        criterion_id: claim.criterion_id,
-                        outcome: claim.outcome,
-                    })),
-                    contract_item_claims: (view.executionReport?.contract_item_claims ?? [])
-                        .map((claim) => ({
-                        item_id: claim.item_id,
+                        id: claim.id,
                         outcome: claim.outcome,
                     })),
                     worker_results: workerResults,
@@ -238,11 +233,10 @@ export function buildExplain(loopId, entries, round, legacyRounds = 0) {
                     })),
                 }
                 : null,
-            contractRedirect: view.contractTransition
+            contractRedirect: view.contractRedirect
                 ? {
-                    kind: view.contractTransition.kind,
-                    contract_id: view.contractTransition.contract_id,
-                    ...(view.contractTransition.reason !== undefined
+                    contract_id: view.contractRedirect.contract_id,
+                    ...(view.contractRedirect.reason !== undefined
                         ? { reason: redirectReason.text }
                         : {}),
                 }
@@ -330,9 +324,8 @@ export function renderExplain(result) {
             agent: {
                 successClaim: round.agentSuccessClaim,
                 outcome: round.agentOutcome,
-                outcomeDeclared: round.agentOutcomeDeclared,
                 shouldContinue: round.agentShouldContinue,
-                agentStopReason: round.agentStopReason,
+                blocker: round.blocker,
             },
             loopforge: {
                 action: round.action,
@@ -355,8 +348,14 @@ export function renderExplain(result) {
             if (round.report.subtask_boundary_label) {
                 lines.push(`    subtask boundary (Agent report): ${round.report.subtask_boundary_label}`);
             }
-            for (const claim of round.report.contract_item_claims) {
-                lines.push(`    item claim (Agent report): ${claim.item_id} → ${claim.outcome}`);
+            for (const claim of round.report.claims) {
+                const kind = claim.id.startsWith("rci-")
+                    ? "contract item claim"
+                    : "criterion claim";
+                lines.push(`    ${kind} (Agent report): ${claim.id} → ${claim.outcome}`);
+            }
+            if (round.report.objective_refinement) {
+                lines.push(`    objective refinement (Agent report): ${round.report.objective_refinement}`);
             }
             for (const worker of round.report.worker_results) {
                 lines.push(`    worker ${worker.agent_id} (${worker.outcome}): ${worker.result_summary.slice(0, 160)}`);
@@ -393,9 +392,6 @@ export function renderExplain(result) {
         }
         for (const question of round.openQuestions) {
             lines.push(`  open question (Agent report): ${question.slice(0, 160)}`);
-        }
-        if (round.blocker) {
-            lines.push(`  blocker (Agent report): ${round.blocker.slice(0, 160)}`);
         }
         for (const observation of round.observations.after) {
             lines.push(`  observation: ${observation.providerId} [${observation.status}] ${observation.files.length} file(s)`);
@@ -437,8 +433,7 @@ export function renderExplain(result) {
             }
         }
         if (round.contractRedirect) {
-            lines.push(`  contract redirect: ${round.contractRedirect.kind} ` +
-                `${round.contractRedirect.contract_id}` +
+            lines.push(`  contract redirect: ${round.contractRedirect.contract_id}` +
                 (round.contractRedirect.reason
                     ? ` — ${round.contractRedirect.reason.slice(0, 160)} (report only)`
                     : " (report only)"));

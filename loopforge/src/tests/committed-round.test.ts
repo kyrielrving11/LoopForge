@@ -13,6 +13,7 @@ import {
 import type { MachineObservation } from "../protocol.js";
 import { committedBacktrackRound, committedFeedbackRound, withTransaction } from "./_helpers.js";
 import { claimedMetCriteria } from "../self-eval.js";
+import { deriveCriterionId } from "../token-utils.js";
 
 /** The durable session document — the frontier a read-only view reads. */
 function sessionEntry(loopId: string, currentRound: number): Record<string, unknown> {
@@ -29,7 +30,7 @@ describe("CommittedRoundView", () => {
     const raw = committedFeedbackRound(2, {
       loopId: "view",
       outcome: "partial",
-      met: ["criterion"],
+      met: [deriveCriterionId("criterion")],
       files: ["src/a.ts"],
       attempt: 3,
     });
@@ -38,7 +39,7 @@ describe("CommittedRoundView", () => {
     assert.equal(durable.round, 2);
     assert.equal(durable.attempt, 3);
     assert.equal(durable.agentOutcome, "partial");
-    assert.deepEqual(claimedMetCriteria(durable.executionReport), ["criterion"]);
+    assert.deepEqual(claimedMetCriteria(durable.executionReport), [deriveCriterionId("criterion")]);
     assert.equal(durable.sequence, 2);
   });
 
@@ -123,16 +124,15 @@ describe("CommittedRoundView", () => {
   it("projects a committed view to the compiler's previous-round shape", () => {
     const view = decodeCommittedRound(committedFeedbackRound(2, {
       loopId: "parity",
-      success: true,
       outcome: "partial",
       discoveredConstraints: ["a limit"],
       files: ["src/a.ts"],
-      met: ["criterion"],
+      met: [deriveCriterionId("criterion")],
     }));
     assert.ok(view);
     const result = roundResultFromCommittedRound(view);
     assert.equal(result.round, 2);
-    assert.equal(result.agentSuccessClaim, true);
+    assert.equal(result.agentSuccessClaim, false);
     assert.equal(result.output_summary, "Committed round 2.");
     assert.deepEqual(result.discovered_constraints, ["a limit"]);
     assert.equal(result.agentOutcome, "partial");
@@ -180,7 +180,7 @@ describe("CommittedRoundView", () => {
         constraints_active: [],
         committed_action: "continue",
       },
-      success: false,
+      outcome: "failed",
     }, "continue", {
       beforeEvidence: [
         git("git", "before", "aaa"),

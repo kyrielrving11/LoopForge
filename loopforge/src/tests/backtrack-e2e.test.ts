@@ -34,14 +34,14 @@ installTestCommandProvider();
  *  progress_stall after 3 consecutive rounds. */
 function stalledEval(round: number, progress: number, files: string[]) {
   return {
-    success: false as const,
+    outcome: "failed" as const,
     output_summary: `Round ${round}: reviewed ${files.join(", ")}, no new progress.`,
     should_continue: true as const,
     constraint_violations: [] as string[],
     execution_report: {
       files_changed: files,
-      tests_reported: { passed: 0, failed: 0, skipped: 0 },
-      criterion_claims: criterionClaims([] as string[], ["Complete the task"]),
+
+      claims: criterionClaims([] as string[], ["Complete the task"]),
     },
   };
 }
@@ -83,14 +83,14 @@ function initWorkspace(): string {
  *  evaluated, never replayed as the old backtrack decision. */
 function fixedEval(round: number, files: string[]) {
   return {
-    success: true as const,
+    outcome: "partial" as const,
     output_summary: `Round ${round}: fixed the root cause, tests now pass.`,
     should_continue: true as const,
     constraint_violations: [] as string[],
     execution_report: {
       files_changed: files,
-      tests_reported: { passed: 0, failed: 0, skipped: 0 },
-      criterion_claims: criterionClaims(["Complete the task"], [] as string[]),
+
+      claims: criterionClaims(["Complete the task"], [] as string[]),
     },
   };
 }

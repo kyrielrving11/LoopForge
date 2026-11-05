@@ -78,7 +78,7 @@ function result(overrides: Partial<RoundProcessResult> = {}): RoundProcessResult
 
 function input(overrides: Partial<ReceiptInput> = {}): ReceiptInput {
   const selfEval = makeSelfEvaluation({
-    success: true,
+    outcome: "partial",
     output_summary: "did the work",
     constraint_violations: [],
     should_continue: true,
@@ -164,7 +164,7 @@ afterEach(() => resetPolicy());
 describe("v3.9.1 — submission receipt", () => {
   it("v4.0.2: open_questions is report-only and the prompt context is projected", () => {
     const selfEval = makeSelfEvaluation({
-      success: true,
+      outcome: "partial",
       output_summary: "did the work",
       constraint_violations: [],
       should_continue: true,
@@ -189,14 +189,12 @@ describe("v3.9.1 — submission receipt", () => {
     assert.equal(receipt.prompt?.context_reason, "enforcement_retry");
   });
 
-  it("v4.0.4: derives loop_stop_reason and agent_stop_reason without persisting them", () => {
+  it("v4.0.6: derives loop_stop_reason and objective_refinement without persisting them", () => {
     const selfEval = makeSelfEvaluation({
-      success: false,
       output_summary: "cannot continue",
       constraint_violations: [],
       should_continue: false,
       outcome: "blocked",
-      agent_stop_reason: "blocked",
       blocker: "needs a decision",
     });
     const receipt = deriveSubmissionReceipt(input({
@@ -211,7 +209,7 @@ describe("v3.9.1 — submission receipt", () => {
       disposition: "stopped",
     }));
     assert.equal(receipt.loop_stop_reason, "blocked");
-    assert.equal(receipt.agent_stop_reason, "blocked");
+    assert.equal(receipt.agent_outcome, "blocked");
     assert.equal(receipt.disposition, "stopped",
       "disposition stays a disposition, not a terminal reason");
   });
@@ -354,7 +352,7 @@ describe("v3.9.1 — submission receipt", () => {
   it("keeps a partially retained array field saved and surfaces the loss", () => {
     const receipt = deriveSubmissionReceipt(input({
       selfEval: makeSelfEvaluation({
-        success: true,
+        outcome: "partial",
         output_summary: "did the work",
         constraint_violations: [],
         should_continue: true,
@@ -379,7 +377,7 @@ describe("v3.9.1 — submission receipt", () => {
   it("marks a whole-field drop as dropped", () => {
     const receipt = deriveSubmissionReceipt(input({
       selfEval: makeSelfEvaluation({
-        success: true,
+        outcome: "partial",
         output_summary: "did the work",
         constraint_violations: [],
         should_continue: true,
@@ -402,7 +400,7 @@ describe("v3.9.1 — submission receipt", () => {
   it("labels an uncertain retained value as retention unknown", () => {
     const receipt = deriveSubmissionReceipt(input({
       selfEval: makeSelfEvaluation({
-        success: true,
+        outcome: "partial",
         output_summary: "did the work",
         constraint_violations: [],
         should_continue: true,
@@ -515,7 +513,7 @@ describe("v3.9.1 — submission receipt", () => {
     const redoEntry = committedFeedbackRound(2, {
       loopId: "receipt-recovery",
       branchId: "tx-child",
-      success: true,
+      outcome: "success",
       restore: {
         directiveTransactionId: "tx-child",
         redoRound: 2,
@@ -580,13 +578,13 @@ describe("v3.9.2 — files reconciliation", () => {
   it("compares the report with the shared Git change set", () => {
     const receipt = deriveSubmissionReceipt(input({
       selfEval: makeSelfEvaluation({
-        success: true,
+        outcome: "partial",
         output_summary: "did the work",
         constraint_violations: [],
         should_continue: true,
         execution_report: makeExecutionReport({
           files_changed: ["a.ts"],
-          tests_reported: null,
+
         }),
       }),
       submittedFields: [...CORE, "execution_report.files_changed"],
@@ -603,7 +601,7 @@ describe("v3.9.2 — files reconciliation", () => {
   it("marks a no-Git round as not applicable", () => {
     const receipt = deriveSubmissionReceipt(input({
       selfEval: makeSelfEvaluation({
-        success: true,
+        outcome: "partial",
         output_summary: "did the work",
         constraint_violations: [],
         should_continue: true,
@@ -652,7 +650,7 @@ describe("v3.9.2 — files reconciliation", () => {
   it("still derives reconciliation on a rejected attempt", () => {
     const receipt = deriveSubmissionReceipt(input({
       selfEval: makeSelfEvaluation({
-        success: true,
+        outcome: "partial",
         output_summary: "premature",
         constraint_violations: [],
         should_continue: true,

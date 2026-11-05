@@ -22,10 +22,11 @@
  *  boundary and `submission_guidance` cannot disagree about them.
  */
 import { deriveActiveRoundContract } from "../round-contract.js";
+import { deriveContractRequirement } from "../contract-requirement.js";
 import { historyWindow, loadCommittedHistory } from "../history.js";
-import { boundedEmergedSubtasks, normalizeSelfEvaluation, parseSubGoalUpdates, validateContractShape, validateContractTransition, validateCoreSelfEvaluation, validateSubGoalUpdatesShape, } from "../self-eval.js";
+import { boundedEmergedSubtasks, normalizeSelfEvaluation, parseSubGoalUpdates, validateContractShape, validateCoreSelfEvaluation, validateSubGoalUpdatesShape, } from "../self-eval.js";
 import { deriveEmergedItems, deriveSubGoals, validateSubGoalUpdates, } from "../subgoal-state.js";
-import { isConfiguredCommand } from "../policy.js";
+import { deriveConfiguredCapability, isConfiguredCommand } from "../policy.js";
 import { canonicalContractItemText, deriveCriterionId, isRecord, uniqueNormalized, } from "../token-utils.js";
 import { latestObjective } from "../loop-compiler.js";
 import { deriveConstraintProvenance, resolveConstraintRetractions, } from "../constraint-lifecycle.js";
@@ -133,7 +134,24 @@ function rejectedDiagnostic(path, code, detail) {
     return { path, code, handling: "rejected", detail };
 }
 const EVALUATION_REQUIRED = "A structured evaluation object is required. Resubmit the same submissionHandle " +
-    "with success, output_summary, constraint_violations, and should_continue.";
+    "with outcome, output_summary, constraint_violations, and should_continue.";
+/** A contract refusal is either a malformed declaration or a coverage/stop
+ *  rule. The detailed reason is always in `contract_errors`; this top-level
+ *  sentence must not call a coverage refusal "malformed". */
+function contractRefusalDetail(errors) {
+    if (errors.some((error) => error.reason === "contract_on_stop")) {
+        return "A stopping or blocked round cannot leave a round_contract for the " +
+            "next round. Remove it and resubmit the same submissionHandle.";
+    }
+    if (errors.some((error) => error.reason === "contract_required")) {
+        return "This continuing round must leave an active Round Contract for the " +
+            "next round. Submit round_contract with a work_item and at least one " +
+            "item bound to a configured command, then resubmit the same " +
+            "submissionHandle.";
+    }
+    return "The Round Contract declaration or its item claims are malformed. " +
+        "Fix them and resubmit the same submissionHandle.";
+}
 /** THE submission boundary. Five checks, in this order, all of them before
  *  anything durable happens.
  *
@@ -253,8 +271,7 @@ export function validateSubmission(store, session, submission) {
     if (contractErrors.length > 0) {
         return {
             ok: false,
-            stopDetail: "The Round Contract declaration or its item claims are malformed. " +
-                "Fix them and resubmit the same submissionHandle.",
+            stopDetail: contractRefusalDetail(contractErrors),
             submissionError: {
                 code: "contract_invalid",
                 details: {
@@ -318,21 +335,64 @@ function contractShapeErrors(store, session, submission, criteria) {
         activeItemIds: session
             ? new Set((active?.items ?? []).map((item) => item.id))
             : null,
+        // v4.0.6: the `supersedes` modifier is a STRUCTURAL boundary like the
+        // contract itself. Target identity and "successor acceptance content
+        // actually changed" are checked only when the active contract was
+        // observable; structure stays strict either way.
+        observed: session !== undefined,
+        activeContractId: session ? active?.id ?? null : null,
+        activeItemIdentities: active
+            ? new Set(active.items.map((item) => canonicalContractItemText(item)))
+            : null,
         knownCriterionIds: criteria
             ? new Set(criteria.map((criterion) => criterion.id))
             : null,
         isConfiguredCommand,
     });
-    // v3.9.9: the transition is a STRUCTURAL boundary like the contract itself.
-    // Target identity and "successor content actually changed" are checked only
-    // when the active contract was observable; structure stays strict either way.
-    const transitionErrors = validateContractTransition(submission, {
-        observed: session !== undefined,
-        activeContractId: active?.id ?? null,
-        activeItemIdentities: active
-            ? new Set(active.items.map((item) => canonicalContractItemText(item)))
-            : null,
+    if (!session)
+        return shapeErrors;
+    // v4.0.6: contract coverage BEFORE round advancement, always with
+    // closure="open" — this attempt's evidence cannot be assumed to close the
+    // active contract. `contract_required` uses the SAME derivation as the
+    // post-evidence gate.
+    const errors = [...shapeErrors];
+    const proposalPresent = submission.round_contract !== undefined;
+    const shouldContinue = submission.should_continue !== false;
+    const blocked = submission.outcome === "blocked";
+    const requirement = deriveContractRequirement({
+        shouldContinue,
+        blocked,
+        proposalPresent,
+        activeContract: active,
+        closure: "open",
+        contractCapability: deriveConfiguredCapability(getPolicy()).contractVerificationAvailable,
     });
-    return [...shapeErrors, ...transitionErrors];
+    if (requirement.required) {
+        errors.push({
+            field: "round_contract",
+            reason: "contract_required",
+            detail: requirement.reason === "no_active_contract"
+                ? "an after-capable verification command is configured and this round " +
+                    "continues, but no Round Contract is active for the next round and " +
+                    "none was proposed; submit round_contract (work_item + items with " +
+                    "verify_with)"
+                : "the active Round Contract closed and this round continues, but no " +
+                    "successor round_contract was proposed; submit the next slice's " +
+                    "contract",
+        });
+    }
+    if (proposalPresent && (!shouldContinue || blocked)) {
+        errors.push({
+            field: "round_contract",
+            reason: "contract_on_stop",
+            detail: !shouldContinue
+                ? "round_contract activates a NEXT-round contract; it cannot be submitted " +
+                    "with should_continue=false — a stopping round must not leave an " +
+                    "unused contract"
+                : "round_contract cannot be submitted with outcome=blocked — a blocked " +
+                    "round closes the contract and must not leave an unused successor",
+        });
+    }
+    return errors;
 }
 //# sourceMappingURL=submission-boundary.js.map

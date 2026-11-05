@@ -1,5 +1,83 @@
 # Changelog
 
+## 4.0.6 (2026-11-05)
+
+**The contract-coverage / objective-evolution / model-surface release.** This
+is a BREAKING protocol release with NO migration. 4.0.5 committed rounds and
+held sessions are reported as legacy (`legacyRounds` / `legacy_history`); they
+are never silently migrated, recompiled or re-read under the new field names.
+
+Schema versions: `ROUND_TRANSACTION_SCHEMA_VERSION` 8 → 9,
+`PROMPT_ARTIFACT_SCHEMA_VERSION` 11 → 12, `CANONICAL_STATE_SCHEMA_VERSION`
+9 → 10. `POLICY_SCHEMA_VERSION` stays "10"; `CHECKPOINT_SCHEMA_VERSION` stays 1
+and `GIT_OBSERVATION_SCHEMA_VERSION` stays 2.
+
+### One round conclusion
+
+- `SelfEvaluation.outcome` is required and is the ONE round conclusion.
+  `success` and `agent_stop_reason` are removed.
+- Strict combinations: `success` requires `should_continue=false`; `blocked`
+  requires `should_continue=false` and a non-empty `blocker` (≤500 chars).
+  `partial` and `failed` may continue or stop. A `blocker` on a non-blocked
+  outcome is dropped with a diagnostic, never a rejection.
+- Stop mapping: blocked → `blocked`; success + closed contract → `completed`;
+  success + open contract → `incomplete`; partial → `incomplete`; failed →
+  `failed`.
+- `agentSuccessClaim` / `success_claim` remain DERIVED read projections of
+  `outcome === "success"`; they are not input fields.
+
+### One claims channel
+
+- `execution_report.claims: { id, outcome }[]` replaces `criterion_claims` and
+  `contract_item_claims`. `cr-` ids are advisory (unknown/malformed entries are
+  dropped); `rci-` ids are strict ACTIVE contract-item claims (`contract_invalid`
+  for unknown/duplicate ids).
+- `execution_report.tests_reported` is removed end to end. Command observations
+  are the only test fact; no heuristic test-count parsing or mismatch check
+  exists.
+- `contract_premature` is now an ERROR; a different proposal while the active
+  contract is open is no longer silently stored.
+
+### Contract coverage
+
+- New pure `contract-requirement.ts` is the ONE requirement rule shared by the
+  submission boundary and the post-evidence gate.
+- With an after-capable command, a continuing round must leave an ACTIVE
+  contract for the next round. New errors: `contract_required`,
+  `contract_successor_unchanged`; `contract_premature` moves from warn to
+  error. The pre-advance boundary rejects a missing required contract and any
+  proposal on a stop/blocked round (`contract_on_stop`) with zero side effects.
+- `round_contract.supersedes` replaces `contract_transition`; `ContractSupersede`
+  replaces `ContractTransition`. A successor for a closed contract must change
+  the acceptance items.
+- `scope` and `supersedes` are report-only and no longer participate in `rc-`
+  identity. `ContractItemProposal.criterion_refs` is optional and defaults to
+  `[]`.
+- Without an after-capable command no contract is required; the Current Task
+  falls back to the invocation instruction or the working objective.
+
+### Objective evolution
+
+- `SelfEvaluation.objective_refinement` is restored (≤1000 chars, strict): it
+  evolves the OVERALL working objective text, is event-driven, and never
+  rewrites Operator Acceptance, success criteria or hard constraints.
+- The working objective is the latest committed refinement on the current
+  branch, else the acceptance task. goalId derives from it, so a refinement can
+  select L2. Refinements on abandoned branches never apply.
+
+### Read surfaces
+
+- `CommittedRoundView.objectiveRefinement` and `contractRedirect` (derived from
+  the proposal's `supersedes`) replace `contractTransition`; committed
+  receipts add `objective_refinement` and `redirect_reason`, and remove
+  `agent_stop_reason`.
+- Explain/Replay/Audit/ResultFacts/Working Memory render `outcome` + `blocker`;
+  the derived/declared split and Agent stop-reason fields are gone. Canonical
+  state schema 10 renders the working objective and drops Agent-reported test
+  counts.
+- `round_scope_drift` remains report-only; `subtask_boundary_label` and
+  `retroactiveClaims` are unchanged.
+
 ## 4.0.5 (2026-10-30)
 
 **The invocation cold-handoff / current-instruction release.** Additive only:

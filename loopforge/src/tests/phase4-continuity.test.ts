@@ -56,15 +56,17 @@ import { CompileFailureError } from "../errors.js";
 afterEach(() => resetPolicy());
 
 function rejectedEvaluation(): SelfEvaluation {
+  // success+stop with an unmet criterion reaches the enforcement gate, which
+  // rejects the round before the stop decision.
   return makeSelfEvaluation({
-    success: true,
+    outcome: "success",
     output_summary: "claimed completion",
     constraint_violations: [],
-    should_continue: true,
+    should_continue: false,
     execution_report: makeExecutionReport({
       files_changed: [],
-      tests_reported: null,
-      criterion_claims: criterionClaims(
+
+      claims: criterionClaims(
         [], ["Task goal achieved with verifiable evidence"]),
     }),
   });
@@ -72,14 +74,14 @@ function rejectedEvaluation(): SelfEvaluation {
 
 function continuingEvaluation(): SelfEvaluation {
   return makeSelfEvaluation({
-    success: false,
+    outcome: "failed",
     output_summary: "partial progress",
     constraint_violations: [],
     should_continue: true,
     execution_report: makeExecutionReport({
       files_changed: [],
-      tests_reported: null,
-      criterion_claims: criterionClaims(
+
+      claims: criterionClaims(
         [], ["Task goal achieved with verifiable evidence"]),
     }),
   });
@@ -379,7 +381,7 @@ describe("v4.0.3 — recovery digest provenance", () => {
     currentAfterEvidence: [],
     triggerRound: 2,
     triggerEvaluation: makeSelfEvaluation({
-      success: false,
+      outcome: "failed",
       output_summary: "trigger",
       constraint_violations: [],
       should_continue: true,

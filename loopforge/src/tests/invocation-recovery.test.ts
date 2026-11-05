@@ -28,8 +28,7 @@ import {
   criterionClaims,
   fixtureEvidencePosture,
   installTestCommandProvider,
-  promptArtifact,
-} from "./_helpers.js";
+  promptArtifact, withDefaultContract } from "./_helpers.js";
 import { registerEvidenceProvider } from "../evidence-provider.js";
 import { CompileFailureError } from "../errors.js";
 import { compileLoop } from "../loop-compiler.js";
@@ -58,15 +57,17 @@ function snapshotOf(entry: VaultEntryLike): VaultEntryLike {
 afterEach(() => resetPolicy());
 
 function rejectedEvaluation(): SelfEvaluation {
+  // v4.0.6: success+stop with an unmet criterion still reaches the enforcement
+  // gate, which rejects the round before the stop decision.
   return makeSelfEvaluation({
-    success: true,
+    outcome: "success",
     output_summary: "claimed completion",
     constraint_violations: [],
-    should_continue: true,
+    should_continue: false,
     execution_report: makeExecutionReport({
       files_changed: [],
-      tests_reported: null,
-      criterion_claims: criterionClaims(
+
+      claims: criterionClaims(
         [], ["Task goal achieved with verifiable evidence"]),
     }),
   });
@@ -74,14 +75,14 @@ function rejectedEvaluation(): SelfEvaluation {
 
 function continuingEvaluation(): SelfEvaluation {
   return makeSelfEvaluation({
-    success: false,
+    outcome: "failed",
     output_summary: "partial progress",
     constraint_violations: [],
     should_continue: true,
     execution_report: makeExecutionReport({
       files_changed: [],
-      tests_reported: null,
-      criterion_claims: criterionClaims(
+
+      claims: criterionClaims(
         [], ["Task goal achieved with verifiable evidence"]),
     }),
   });
@@ -469,7 +470,11 @@ describe("v4.0.5 — current user instruction is invocation input", () => {
       task: "Original task text",
       current_user_instruction: "Also check the parser edge case",
     }), {
-      results: [committedFeedbackRound(1, { loopId, contract })],
+      results: [committedFeedbackRound(1, {
+        loopId,
+        contract,
+        task: "Original task text",
+      })],
     });
     assert.match(response.prompt, /\*\*Slice A\*\*/,
       "the contract remains the Current Task");
@@ -770,7 +775,9 @@ describe("v4.0.5 — instruction travels through submissions and resume", () => 
       const started = await mgr.create({ task: "Submission task", loopId });
       const accepted = await TOOL_HANDLERS.loopforge_next(mgr, {
         submissionHandle: started.submissionHandle,
-        evaluation: continuingEvaluation(),
+        evaluation: withDefaultContract({
+          evaluation: continuingEvaluation() as unknown as Record<string, unknown>,
+        }).evaluation,
         currentUserInstruction: "Carry me to the next round",
       });
       assert.equal(accepted.error, undefined);
@@ -988,7 +995,7 @@ describe("v4.0.5 — rebindHeldPrompt keeps the retry identity", () => {
   function heldSnapshot(): RoundTransactionSnapshot {
     const posture = fixtureEvidencePosture(2);
     return {
-      schemaVersion: 8,
+      schemaVersion: 9,
       branchId,
       transactionId: "tx-old",
       kind: "evaluation",

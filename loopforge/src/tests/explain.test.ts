@@ -91,6 +91,19 @@ describe("v3.8 — explain view", () => {
     assert.deepEqual(round.files_changed, ["src/a.ts"]);
   });
 
+  it("v4.0.6: exposes the committed objective refinement as an Agent report", () => {
+    const result = buildExplain("explain-loop", [
+      entry(1, {
+        objectiveRefinement: "Deliver the portal with migration tooling",
+      }),
+    ]);
+    assert.equal(result.rounds[0]?.report?.objective_refinement,
+      "Deliver the portal with migration tooling");
+    assert.ok(renderExplain(result).includes(
+      "objective refinement (Agent report): Deliver the portal with migration tooling",
+    ));
+  });
+
   it("marks a round without after-phase observations as evidence-incomplete", () => {
     const result = buildExplain("explain-loop", [entry(1)]);
     assert.equal(result.rounds[0].evidenceIncomplete, true);
@@ -161,8 +174,7 @@ describe("v3.8 — explain view", () => {
     const round = result.rounds[0];
     assert.ok(round.report);
     assert.equal(round.report?.output_summary, "no execution report but a real summary");
-    assert.deepEqual(round.report?.criterion_claims, []);
-    assert.deepEqual(round.report?.contract_item_claims, []);
+    assert.deepEqual(round.report?.claims, []);
   });
 
   it("v4.0.2: exposes context, assumptions, questions and blocker", () => {
@@ -226,8 +238,9 @@ describe("v3.8 — explain view", () => {
   });
 
   it("keeps the machine report out of the agent's claim fields", () => {
-    const report = makeExecutionReport({ criterion_claims: criterionClaims(["cr-11111111"]) });
-    assert.equal(report.contract_item_claims?.length, 0);
+    const report = makeExecutionReport({ claims: criterionClaims(["cr-11111111"]) });
+    assert.equal(report.claims?.length, 1);
+    assert.equal(report.claims?.[0]?.id, "cr-11111111");
   });
 });
 
@@ -245,9 +258,8 @@ describe("v4.0.4 — explain separates the three fact kinds", () => {
   it("renders Agent report, LoopForge decision and Machine evidence once", () => {
     const result = buildExplain(loopId, [
       entryFor(1, {
-        success: false,
+        outcome: "failed",
         shouldContinue: false,
-        agentStopReason: "gave_up",
         stopReason: "failed",
         outputSummary: "tried and failed",
         blocker: "missing credentials",
@@ -255,9 +267,9 @@ describe("v4.0.4 — explain separates the three fact kinds", () => {
     ]);
     const round = result.rounds[0]!;
     assert.equal(round.loopStopReason, "failed");
-    assert.equal(round.agentStopReason, "gave_up");
+    assert.equal(round.agentOutcome, "failed");
     assert.equal(round.agentShouldContinue, false);
-    assert.equal(round.agentOutcomeDeclared, null);
+    assert.equal(round.agentOutcome, "failed");
     assert.ok(!("machineBackedSuccess" in round),
       "the posture owns machineBackedSuccess; explain must not repeat it");
 
@@ -266,9 +278,11 @@ describe("v4.0.4 — explain separates the three fact kinds", () => {
     assert.ok(text.includes("LoopForge decision"));
     assert.ok(text.includes("Machine evidence"));
     assert.ok(text.includes("loop_stop_reason: failed"));
-    assert.ok(text.includes("agent_stop_reason: gave_up"));
+    assert.ok(text.includes("outcome: failed"));
     assert.ok(text.includes("output_summary (Agent report): tried and failed"));
-    assert.ok(text.includes("blocker (Agent report): missing credentials"));
+    assert.ok(text.includes("blocker: missing credentials"));
+    assert.equal(text.match(/blocker: missing credentials/g)?.length, 1,
+      "the blocker appears once in the three fact blocks");
     assert.ok(!/\n  stop_reason:/.test(text), "the old ambiguous label is gone");
     assert.ok(!/\n  evidence: /.test(text), "explain must not hand-render a second posture");
     assert.ok(!/\bconflict\b/i.test(text));
@@ -330,16 +344,14 @@ describe("v4.0.4 — explain separates the three fact kinds", () => {
   it("Explain and its embedded receipt agree about the same committed facts", () => {
     const result = buildExplain(loopId, [
       entryFor(1, {
-        success: false,
         outcome: "blocked",
         shouldContinue: false,
-        agentStopReason: "needs_human_input",
         stopReason: "blocked",
         blocker: "needs a decision",
       }),
     ]);
     const round = result.rounds[0]!;
     assert.equal(round.submission.loop_stop_reason, round.loopStopReason);
-    assert.equal(round.submission.agent_stop_reason, round.agentStopReason);
+    assert.equal(round.submission.agent_outcome, round.agentOutcome);
   });
 });

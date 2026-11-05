@@ -2,8 +2,9 @@
  *  which Agent-reported criteria completions are backed by machine evidence.
  *
  *  v4.0.3 changes the ONLY upgrade path: a claim becomes `verified` when its
- *  criterion id is in the machine-verified set. Agent-reported test counts
- *  (`tests_reported`) are never evidence and can no longer upgrade a claim.
+ *  criterion id is in the machine-verified set. v4.0.6 reads the ONE
+ *  `execution_report.claims` channel and filters `cr-` entries; `rci-` entries
+ *  are contract-item claims, not criterion claims.
  *
  *  Pure functions, no persistence. The inputs (evaluation, machine criterion
  *  facts, verification flags) are already committed, so every claim view can

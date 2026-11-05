@@ -28,17 +28,31 @@ export enum AgentStatus {
  *  v1.4 (P0–P2): Three new optional fields enable cognitive evolution.
  *  v1.5 (P4–P5): Execution evidence, progress tracking, and self-correction.
  *
+ *  v4.0.6: `outcome` is the ONE round conclusion (it replaces `success` and
+ *  `agent_stop_reason`); `execution_report.claims` is the ONE claims channel
+ *  (it replaces `criterion_claims` + `contract_item_claims`); `round_contract`
+ *  is the ONE contract channel (an optional `supersedes` modifier replaces
+ *  `contract_transition`). The required field set is still exactly four:
+ *  `outcome`, `output_summary`, `constraint_violations`, `should_continue`.
+ *
  *  Optional fields are normalized leniently and never dropped silently: the
  *  normalizer returns stable diagnostics for every correction, and a committed
- *  transaction persists them with the submitted-field manifest. Four fields
- *  are structural exceptions validated BEFORE the round advances —
- *  `subgoal_updates`, `round_contract`, `contract_transition`, and
- *  `execution_report.contract_item_claims` — because each references the exact
- *  derived set the Agent was shown. `scope` is deliberately not structural:
- *  optional, report-only intent, normalized leniently and never rejected. */
+ *  transaction persists them with the submitted-field manifest. Two fields are
+ *  structural exceptions validated BEFORE the round advances —
+ *  `subgoal_updates` and `round_contract` (including its `supersedes` and the
+ *  `rci-` entries of `execution_report.claims`) — because each references the
+ *  exact derived set the Agent was shown. `scope` is deliberately not
+ *  structural: optional, report-only intent, normalized leniently and never
+ *  rejected.
+ *
+ *  `objective_refinement` evolves the OVERALL starting objective (the working
+ *  version of `OperatorAcceptance.task`), not the current round's slice. It is
+ *  event-driven and never changes criteria or hard constraints. */
 export interface SelfEvaluation {
-  /** true ONLY if all hard constraints were met and the task goal was achieved. */
-  success: boolean;
+  /** The ONE round conclusion. `success` requires `should_continue=false`;
+   *  `blocked` requires `should_continue=false` and a non-empty `blocker`;
+   *  `partial` and `failed` may continue or stop. */
+  outcome: RoundOutcome;
   /** Specific, actionable summary of what was DONE this round.
    *  Feeds: committed record, state file, audit/replay/explain, backtrack
    *  facts, and the BOUNDED fresh-prompt Working Memory. It is always an
@@ -104,20 +118,18 @@ export interface SelfEvaluation {
    *  The main agent reports what it delegated; the report is saved inside the
    *  committed transaction for audit. Omit or leave empty if none occurred. */
   worker_results?: WorkerResult[];
-  /** v2.5 / v4.0.4: the AGENT's declared stop reason (renamed from
-   *  `stop_reason` so it cannot be confused with LoopForge's `StopReason`).
-   *  Only meaningful when should_continue=false and success=false. Defaults to
-   *  "gave_up" (current behavior) when absent. "blocked" means work cannot
-   *  proceed under current constraints; "needs_human_input" requires
-   *  intervention. It is an Agent report, never a loop terminal reason. */
-  agent_stop_reason?: "gave_up" | "blocked" | "needs_human_input";
-  /** v2.12: Declared outcome (four values). When absent, derived from success
-   *  (true → "success", false → "failed"). "partial" and "blocked" can only
-   *  be declared explicitly. A declared non-success outcome suppresses the
-   *  success-class verification checks even when success=true. */
-  outcome?: RoundOutcome;
-  /** v2.12: Flat blocker description, meaningful only when outcome==="blocked".
-   *  Also feeds the user/agent gate classification (P2). ≤ 500 chars. */
+  /** v4.0.6: the Agent's working version of the OVERALL starting objective
+   *  (`OperatorAcceptance.task`). When present, the latest committed
+   *  refinement on the current branch replaces the working objective used by
+   *  the next prompt and goalId. It never rewrites Operator Acceptance,
+   *  success criteria or hard constraints, and it is not the round task or
+   *  contract. Event-driven: omit when the overall objective is unchanged.
+   *  Strict at the submission boundary: string, trim non-empty, ≤ 1000 chars. */
+  objective_refinement?: string;
+  /** v2.12 / v4.0.6: Flat blocker description, required when
+   *  outcome==="blocked" (trim non-empty, ≤ 500 chars). When another outcome
+   *  is declared it is dropped with a diagnostic and never rejects the round.
+   *  Also feeds the user/agent gate classification (P2). */
   blocker?: string;
   /** v2.12: Retroactive claims that a PRIOR round satisfied a criterion.
    *  The runtime verifies these against the prior round's git evidence.
@@ -136,19 +148,15 @@ export interface SelfEvaluation {
    *  the round is rejected. Safe pre-work (investigation, dry-runs,
    *  rollback evidence) never needs a gate. */
   gate_ids?: string[];
-  /** v3.3: Round Contract. v3.4: a PROPOSAL for the NEXT round's contract
-   *  (restated unchanged while the current one is active; a new one after
-   *  it completes or blocks). Becomes the ACTIVE contract only once this
-   *  round commits; it is then derived at compile time from committed
-   *  rounds — see round-contract.ts. Optional. */
+  /** v3.3/v4.0.6: THE Round Contract channel. A PROPOSAL for the NEXT
+   *  round's contract. Omit it to continue the active contract unchanged;
+   *  declare it to start the next slice; add the optional `supersedes`
+   *  modifier to replace an active contract that is no longer the right
+   *  slice. Becomes the ACTIVE contract only once this round commits; it is
+   *  then derived at compile time from committed rounds — see
+   *  round-contract.ts. With contract capability, a continuing round must
+   *  leave an active contract for the next round. */
   round_contract?: RoundContractProposal;
-  /** v3.9.9: an explicit contract redirection transaction. The Agent states
-   *  that the ACTIVE contract it saw is no longer the right slice and submits
-   *  its successor in the SAME evaluation. The old contract closes as
-   *  `superseded`; its unverified items remain visible in audit/explain. This
-   *  is a redirect, not a blocked declaration and not a rollback: the
-   *  workspace is untouched and the round cannot be `completed`. */
-  contract_transition?: ContractTransition;
 }
 
 /** v3.9.7: the kind of recovery material a checkpoint represents. `before` is
@@ -302,9 +310,8 @@ export interface RecoveryDirective {
   transaction_id: string;
 }
 
-/** v2.12: Tri-state round outcome. Declared via SelfEvaluation.outcome;
- *  derived from `success` when absent. Shared by the dual gates, the stop
- *  mapping, and the audit view. */
+/** v2.12 / v4.0.6: the ONE round outcome, required on every evaluation.
+ *  Shared by the dual gates, the stop mapping, and every read view. */
 export type RoundOutcome = "success" | "partial" | "failed" | "blocked";
 
 /** v2.12: Structured high-risk action descriptor (internal — audit display
@@ -420,14 +427,14 @@ export interface SubmissionReceipt {
    *  a committed record but NOT the submitted evaluation applied. */
   record: "committed" | "rollback_directive" | "none";
   entered_history: boolean;
-  /** v4.0.3: the Agent's claim carried by this submission. */
+  /** v4.0.3/v4.0.6: the Agent's success claim — a derived projection of
+   *  `outcome === "success"`, never an input field. */
   agent_success_claim: boolean;
-  /** v4.0.3: the effective Agent-declared outcome. */
+  /** v4.0.6: the Agent-declared outcome. */
   agent_outcome: RoundOutcome | null;
-  /** v4.0.4: the Agent's declared stop reason, if any. Derived read-view from
-   *  the committed evaluation; never persisted here and never a second
-   *  source. null means the Agent declared none. */
-  agent_stop_reason: "gave_up" | "blocked" | "needs_human_input" | null;
+  /** v4.0.6: the Agent's working objective refinement carried by this
+   *  submission, verbatim; null means the working objective was unchanged. */
+  objective_refinement: string | null;
   /** v4.0.4: the LoopForge terminal reason, when this submission stopped the
    *  loop. Derived read-view from the SAME `result.stopReason` that Explain,
    *  Replay and resume read; never persisted in the receipt and never
@@ -458,12 +465,12 @@ export interface SubmissionReceipt {
       after_id: string | null;
       activated: boolean;
       closed: boolean;
-      /** v3.9.9: the ACTIVE contract closed by this round's explicit
-       *  `contract_transition` (report-only fact, derived from the committed
-       *  transition — never inferred from `contract_premature`). */
+      /** v3.9.9/v4.0.6: the ACTIVE contract closed by this round's explicit
+       *  `round_contract.supersedes` (report-only fact, derived from the
+       *  committed redirect — never inferred from `contract_premature`). */
       superseded?: boolean;
-      /** v3.9.9: the Agent's transition reason, verbatim (report-only). */
-      transition_reason?: string;
+      /** v3.9.9/v4.0.6: the Agent's redirect reason, verbatim (report-only). */
+      redirect_reason?: string;
     };
     subgoals_created: Array<{ id: string; description: string }>;
     subgoals_updated: Array<{ id: string; from: string; to: string }>;
@@ -551,8 +558,20 @@ export interface SubmissionGuidance {
   } | null;
   contract_commands: string[];
   contract_verification_available: boolean;
+  /** v4.0.6: the compiled-time contract coverage requirement. A DERIVED
+   *  projection of current facts through `deriveContractRequirement`; it is
+   *  not a new fact and owns no state. */
+  contract_requirement: {
+    /** If you continue, the next round must have an active contract. */
+    required_on_continue: boolean;
+    /** The active contract is still open: closing it this round AND
+     *  continuing requires a successor proposal. */
+    successor_required_if_closed: boolean;
+    reason: "no_active_contract" | "active_contract_continues" | "no_contract_capability";
+    active_contract_id: string | null;
+  };
   subgoals: Array<{ id: string; description: string; status: string }>;
-  /** Current real criteria, for criterion_claims selection/examples. */
+  /** Current real criteria, for `execution_report.claims` selection/examples. */
   criteria: Array<{
     id: string;
     text: string;
@@ -616,7 +635,7 @@ export function makeSelfEvaluation(
   overrides: Partial<SelfEvaluation> = {},
 ): SelfEvaluation {
   return {
-    success: false,
+    outcome: "failed",
     output_summary: "",
     constraint_violations: [],
     should_continue: true,
@@ -631,8 +650,7 @@ export function makeSelfEvaluation(
     worker_results: [],
     subtask_boundary: false,
     subtask_boundary_label: "",
-    agent_stop_reason: undefined,
-    outcome: undefined,
+    objective_refinement: undefined,
     blocker: undefined,
     retroactiveClaims: [],
     no_change_reason: undefined,
@@ -644,8 +662,10 @@ export function makeSelfEvaluation(
 // ── Loop Compile types ──────────────────────────────────────────────────────
 
 export interface LoopObjective {
-  /** The operator objective. It is written once (round 1 / operator
-   *  acceptance) and is never rewritten by an Agent report. */
+  /** v4.0.6: the WORKING objective — the latest committed
+   *  `objective_refinement` on the current branch, else the operator
+   *  acceptance task. Criteria and hard constraints always come from the
+   *  immutable `OperatorAcceptance`; a refinement only changes this text. */
   objective: string;
   success_criteria: string[];
   hard_constraints: string[];
@@ -827,10 +847,12 @@ export function makeConstraintMeta(
 
 export interface LoopRoundResult {
   round: number;
-  /** v4.0.3: the Agent's success claim. */
+  /** v4.0.3: the Agent's success claim — a derived read projection of
+   *  `outcome === "success"`, never an input field. */
   agentSuccessClaim: boolean;
-  /** v4.0.3: the effective Agent-declared outcome. */
-  agentOutcome?: RoundOutcome;
+  /** v4.0.6: the Agent-declared outcome. Always present on an evaluation;
+   *  rollback directives use `RoundProcessResult.agentOutcome = null`. */
+  agentOutcome: RoundOutcome;
   output_summary: string;
   constraint_violations: string[];
   /** P0: Constraints discovered during this round. */
@@ -885,7 +907,7 @@ export function makeLoopRoundResult(
     worker_results: [],
     subtask_boundary: false,
     subtask_boundary_label: "",
-    agentOutcome: undefined,
+    agentOutcome: "failed",
     blocker: undefined,
     retroactiveClaims: [],
     no_change_reason: undefined,
@@ -896,18 +918,14 @@ export function makeLoopRoundResult(
 export interface LoopCompileRequest {
   loop_id: string;
   round: number;
-  /** The change-detection tag derived from `loopId + task`
-   *  (`loop-compiler.ts`). It is a label, not a goal object and not a second
-   *  plan. */
-  goal_id: string;
-  /** The CURRENT user/operator task text for this compile. It is not the
-   *  immutable `LoopObjective.objective`; the prompt renders the objective
-   *  separately, and the Agent's `Current Task` comes from the active Round
-   *  Contract's `work_item` when one exists.
+  /** The LOOP's task text for this compile. `goal_id` is no longer a request
+   *  input: v4.0.6 derives it from the WORKING objective (the latest committed
+   *  `objective_refinement`, else Operator Acceptance), so a refinement
+   *  changes goal identity.
    *
-   *  v4.0.5: this is the LOOP's task. It participates in goal identity,
-   *  density and state hashing. The latest host-provided user input for this
-   *  invocation is `current_user_instruction`, which never changes `task`. */
+   *  v4.0.5: this is the LOOP's task. It participates in density and state
+   *  hashing. The latest host-provided user input for this invocation is
+   *  `current_user_instruction`, which never changes `task`. */
   task: string;
   /** v4.0.5: the host's explicit user instruction for THIS invocation,
    *  already trimmed by the transport boundary. It is invocation input, not
@@ -957,7 +975,6 @@ export function makeLoopCompileRequest(
   return {
     loop_id: "",
     round: 1,
-    goal_id: "",
     task: "",
     loop_objective: null,
     plan_source: null,
@@ -1162,10 +1179,16 @@ export interface PromptWorkingMemoryProjection {
  *  `invocation_recovery` reason. No required field was removed or renamed, so
  *  every 4.0.4 artifact still decodes; the shared decoder whitelists
  *  (`PROMPT_CONTEXT_MODES` / `PROMPT_CONTEXT_REASONS`) are the only legality
- *  boundary. Older versions are a HARD break — a round whose artifact does
- *  not parse is not committed history, and `legacyTransactionRounds` reports
- *  the loss rather than letting it vanish. */
-export const PROMPT_ARTIFACT_SCHEMA_VERSION = 11 as const;
+ *  boundary.
+ *
+ *  v4.0.6: schema 12 is a BREAKING shape break — the evaluation block renders
+ *  `outcome` plus one `execution_report.claims` channel and the contract
+ *  coverage requirement, and the old `success` / `agent_stop_reason` /
+ *  `contract_transition` / `tests_reported` paths are gone. Older artifacts
+ *  are a HARD break — a round whose artifact does not parse is not committed
+ *  history, and `legacyTransactionRounds` reports the loss rather than letting
+ *  it vanish. There is no migration. */
+export const PROMPT_ARTIFACT_SCHEMA_VERSION = 12 as const;
 
 export interface PromptArtifact {
   schemaVersion: typeof PROMPT_ARTIFACT_SCHEMA_VERSION;
@@ -1286,17 +1309,16 @@ export function makeLoopCompileResponse(
 }
 
 /** Why a LOOP stopped — the LoopForge terminal reason (`loop_stop_reason` in
- *  read surfaces). It is never the Agent's declared stop reason; that is
- *  `SelfEvaluation.agent_stop_reason` (`gave_up` / `blocked` /
- *  `needs_human_input`) and is only an Agent report.
+ *  read surfaces). It is never the Agent's round outcome; `outcome` and
+ *  `blocker` are the Agent's report.
  *
- *  `completed` requires both success=true and should_continue=false. It means
- *  the Agent's stop declaration passed the gates; it does NOT imply
- *  `machineBackedSuccess` (the evidence posture's separate machine fact).
- *  `failed` is success=false + should_continue=false (agent gave up).
- *  `cancelled` is manual stop via loopforge_stop. `paused` exists in the type
- *  but a committed round never carries it; pause is expressed by a session
- *  status, not a loop terminal reason. */
+ *  `completed` requires outcome=success, should_continue=false and a closed
+ *  (or absent) active contract. It means the Agent's stop declaration passed
+ *  the gates; it does NOT imply `machineBackedSuccess` (the evidence posture's
+ *  separate machine fact). `failed` is outcome=failed with
+ *  should_continue=false. `cancelled` is manual stop via loopforge_stop.
+ *  `paused` exists in the type but a committed round never carries it; pause
+ *  is expressed by a session status, not a loop terminal reason. */
 export type StopReason =
   | "completed"
   | "failed"
@@ -1459,22 +1481,18 @@ export function makeVerificationResult(
 // recorded, never silently filtered).
 // ═══════════════════════════════════════════════════════════════════════════
 
-/** v3.8: The agent's self-report for a round — renamed from ExecutionReport
- *  because these fields are claims, not evidence. The whole object is
- *  optional; a mistyped optional field is dropped with a warning and never
- *  rejects the round. */
+/** v3.8 / v4.0.6: The agent's self-report for a round. These fields are
+ *  claims, not evidence. The whole object is optional; a mistyped optional
+ *  field is dropped with a warning and never rejects the round. */
 export interface ExecutionReport {
   /** Files the agent says it changed. Informational — compared against the
    *  git observation, never trusted as the observation. */
   files_changed?: string[];
-  /** Test counts the agent reports. Informational. */
-  tests_reported?: { passed: number; failed: number; skipped: number } | null;
-  /** Advisory claims about objective criteria. LENIENT: unknown/duplicate
-   *  criterion ids and malformed outcomes are dropped with a warning. */
-  criterion_claims?: CriterionClaim[];
-  /** Claims about ACTIVE contract items. STRICT: an unknown/duplicate item id
-   *  or an illegal outcome is a structural defect (contract_invalid). */
-  contract_item_claims?: ContractItemClaim[];
+  /** v4.0.6: THE claims channel. `cr-` ids are advisory objective-criterion
+   *  claims (lenient: unknown/malformed entries are dropped with a
+   *  diagnostic); `rci-` ids are strict ACTIVE contract-item claims (an
+   *  unknown/duplicate id or illegal outcome is `contract_invalid`). */
+  claims?: ExecutionClaim[];
 }
 
 export function makeExecutionReport(
@@ -1482,26 +1500,17 @@ export function makeExecutionReport(
 ): ExecutionReport {
   return {
     files_changed: [],
-    tests_reported: null,
-    criterion_claims: [],
-    contract_item_claims: [],
+    claims: [],
     ...overrides,
   };
 }
 
-/** v3.8: An advisory claim about an objective criterion. Lenient by design —
- *  the criterion layer is advisory; the contract item layer is the machine
- *  verification skeleton. */
-export interface CriterionClaim {
-  /** cr-XXXXXXXX (or the criterion text for plain-text matching). */
-  criterion_id: string;
-  outcome: "met" | "remaining";
-}
-
-/** v3.8: A claim about an ACTIVE contract item, cited by the derived
- *  rci-XXXXXXXX id the prompt rendered. */
-export interface ContractItemClaim {
-  item_id: string;
+/** v4.0.6: ONE claim entry. The id prefix routes strictness: `cr-` is an
+ *  advisory criterion claim; `rci-` is a strict active-contract item claim.
+ *  A claim NEVER verifies anything — only machine observation can. */
+export interface ExecutionClaim {
+  /** cr-XXXXXXXX criterion id or rci-XXXXXXXX active contract item id. */
+  id: string;
   outcome: "met" | "remaining";
 }
 
@@ -1513,9 +1522,10 @@ export interface ContractItemClaim {
 export interface ContractItemProposal {
   /** The acceptance condition: what must be true for this slice. */
   description: string;
-  /** v3.9.4: real cr-XXXXXXXX ids of ACTIVE criteria rendered in the
-   *  current prompt. Free text and unknown ids are `contract_invalid`. */
-  criterion_refs: string[];
+  /** v3.9.4/v4.0.6: real cr-XXXXXXXX ids of ACTIVE criteria rendered in the
+   *  current prompt. Optional (defaults to `[]`). Free text and unknown ids
+   *  are `contract_invalid` when present. */
+  criterion_refs?: string[];
   /** Evidence command ids (policy.evidence.commands[].name) that check this
    *  acceptance condition. */
   verify_with: string[];
@@ -1549,23 +1559,27 @@ export interface RoundContractProposal {
    *  declarations, optional when reading legacy committed history. This is
    *  the text the next prompt renders as `Current Task` once active. */
   work_item?: string;
-  /** v3.9.9: the Agent's declared intended file boundary — an optional,
-   *  report-only intent statement. Omission and `[]` both mean "no declared
-   *  intent". It takes part in contract content identity (a restated route is
-   *  a new declaration), but it grants no permission and never rejects a
-   *  round: drift is reported as an info fact only. Required for legacy reads
-   *  of pre-3.9.9 proposals; new declarations may omit it. */
+  /** v3.9.9/v4.0.6: the Agent's declared intended file boundary — an
+   *  optional, report-only intent statement. Omission and `[]` both mean "no
+   *  declared intent". It is rendered in prompts/receipts/audit and drives
+   *  drift reporting, but it does NOT participate in `rc-` identity and
+   *  grants no permission. Required for legacy reads of pre-3.9.9 proposals;
+   *  new declarations may omit it. */
   scope?: string[];
+  /** v4.0.6: explicit replacement of the ACTIVE contract. This is the ONE
+   *  redirect modifier on the ONE contract channel; the target id binds it to
+   *  the exact contract the Agent saw, so a stale prompt cannot close a
+   *  different contract. The successor proposal is this same object's
+   *  `work_item` + `items`; its acceptance items must differ from the target's.
+   *  It does not participate in `rc-` identity. */
+  supersedes?: ContractSupersede;
   items: ContractItemProposal[];
 }
 
-/** v3.9.9: an explicit, one-way redirection of the ACTIVE Round Contract.
- *  The target id binds the transition to the exact contract the Agent saw, so
- *  a stale prompt cannot close a different contract. A legal transition
- *  always carries the successor proposal in the same evaluation. */
-export interface ContractTransition {
-  kind: "supersede";
-  /** Must equal the active contract id (`rc-XXXXXXXX`) rendered in this
+/** v4.0.6: the redirect modifier of a Round Contract proposal. It replaces the
+ *  former standalone `contract_transition` field. */
+export interface ContractSupersede {
+  /** Must equal the ACTIVE contract id (`rc-XXXXXXXX`) rendered in this
    *  round's prompt. */
   contract_id: string;
   /** Agent report, audit only, ≤ 500 chars. */

@@ -10,8 +10,8 @@ import {
   MemoryLoopStore,
   installTestCommandProvider,
   criterionClaims,
-  DEFAULT_SUCCESS_CRITERION,
-} from "./_helpers.js";
+  withDefaultContract,
+  DEFAULT_SUCCESS_CRITERION, itemClaims } from "./_helpers.js";
 import { advanceWithHeld } from "./_helpers.js";
 import { toolNext } from "./_helpers.js";
 import { deriveCriterionId } from "../token-utils.js";
@@ -38,6 +38,7 @@ const EMERGED_CAP = 50;
 /** Build plain agent output. The authoritative report is the structured eval. */
 function agentOutput(opts: {
   success?: boolean;
+  outcome?: "success" | "partial" | "failed" | "blocked";
   violations?: string[];
   shouldContinue?: boolean;
   body?: string;
@@ -51,24 +52,40 @@ function agentOutputNoEval(body?: string): string {
 }
 
 /** Build a structured evaluation object for the evaluation parameter of loopforge_next. */
+/** v4.0.6 fixture: with an after-capable command configured, a continuing
+ *  round must leave an active contract. Non-contract suites use this default
+ *  slice so every ordinary continuation satisfies coverage. */
+function defaultRoundContract(): SelfEvaluation["round_contract"] {
+  const command = getPolicy().evidence.commands.find(
+    (candidate) => candidate.enabled &&
+      (candidate.phase === "after" || candidate.phase === "both"));
+  if (!command) return undefined;
+  return {
+    work_item: "test slice",
+    items: [{ description: "test acceptance condition", verify_with: [command.name] }],
+  };
+}
+
 function evalParam(opts: {
   success?: boolean;
+  outcome?: "success" | "partial" | "failed" | "blocked";
   violations?: string[];
   shouldContinue?: boolean;
   body?: string;
 }): SelfEvaluation {
-  const hasSuccess = opts.success ?? true;
+  const outcome = opts.outcome ?? (opts.success ?? true ? "success" : "failed");
+  const hasSuccess = outcome === "success";
+  const shouldContinue = opts.shouldContinue ?? true;
   return {
-    success: hasSuccess,
+    outcome,
     output_summary: opts.body ?? "Completed the task successfully.",
     constraint_violations: opts.violations ?? [],
-    should_continue: opts.shouldContinue ?? true,
+    should_continue: shouldContinue,
     // Include minimal execution evidence so enforcement gate R3
     // (empty success) doesn't reject valid test rounds.
     execution_report: hasSuccess ? {
       files_changed: ["src/test.ts"],
-      tests_reported: { passed: 1, failed: 0, skipped: 0 },
-      criterion_claims: criterionClaims([], []),
+      claims: criterionClaims([], []),
     } : undefined,
   };
 }
@@ -127,7 +144,7 @@ describe("MCP — loopforge_start", async () => {
     const next = await toolNext(mgr, {
       sessionId: String(start.sessionId),
       submissionHandle: start.submissionHandle,
-      evaluation: evalParam({ success: false, shouldContinue: true }),
+      evaluation: evalParam({ outcome: "failed", shouldContinue: true }),
     });
     assert.equal(next.loopId, "durable-id-test");
   });
@@ -174,15 +191,14 @@ describe("MCP — durable gate resolution", async () => {
       submissionHandle: started.submissionHandle,
       output: "The release needs explicit production authorization.",
       evaluation: {
-        success: false,
         output_summary: "Blocked pending production authorization.",
         constraint_violations: [],
-        should_continue: true,
+        should_continue: false,
         outcome: "blocked",
         blocker: action,
       },
     });
-    assert.equal(advanced.stopReason, undefined);
+    assert.equal(advanced.stopReason, "blocked");
     assert.ok(store.entries.some((entry) => entry.task_type === "gate_opened" && entry.gate_id === gateId));
 
     // Release the first owner's lease, then use a fresh manager as a process
@@ -229,8 +245,8 @@ describe("MCP — multi-round lifecycle", async () => {
     const r1 = await toolNext(mgr, {
       sessionId,
       submissionHandle: start.submissionHandle,
-      output: agentOutput({ success: false, violations: ["missed check"], shouldContinue: true }),
-      evaluation: evalParam({ success: false, violations: ["missed check"], shouldContinue: true }),
+      output: agentOutput({ outcome: "failed", violations: ["missed check"], shouldContinue: true }),
+      evaluation: evalParam({ outcome: "failed", violations: ["missed check"], shouldContinue: true }),
     });
     assert.equal(r1.stopReason, undefined, "round 2 should not stop");
     assert.equal(r1.round, 2);
@@ -240,8 +256,8 @@ describe("MCP — multi-round lifecycle", async () => {
     const r2 = await toolNext(mgr, {
       sessionId,
       submissionHandle: r1.submissionHandle,
-      output: agentOutput({ success: true, shouldContinue: true }),
-      evaluation: evalParam({ success: true, shouldContinue: true }),
+      output: agentOutput({ outcome: "partial", shouldContinue: true }),
+      evaluation: evalParam({ outcome: "partial", shouldContinue: true }),
     });
     assert.equal(r2.stopReason, undefined, "round 3 should not stop");
     assert.equal(r2.round, 3);
@@ -250,8 +266,8 @@ describe("MCP — multi-round lifecycle", async () => {
     const r3 = await toolNext(mgr, {
       sessionId,
       submissionHandle: r2.submissionHandle,
-      output: agentOutput({ success: true, shouldContinue: false }),
-      evaluation: evalParam({ success: true, shouldContinue: false }),
+      output: agentOutput({ outcome: "success", shouldContinue: false }),
+      evaluation: evalParam({ outcome: "success", shouldContinue: false }),
     });
     assert.equal(r3.prompt, null);
     assert.equal(r3.stopReason, "completed");
@@ -279,7 +295,7 @@ describe("MCP — multi-round lifecycle", async () => {
       sessionId: start.sessionId,
       submissionHandle: start.submissionHandle,
       evaluation: {
-        success: "false",
+        outcome: "maybe",
         output_summary: "invalid core types",
         constraint_violations: ["valid", 42],
         should_continue: true,
@@ -288,7 +304,7 @@ describe("MCP — multi-round lifecycle", async () => {
     assert.equal(result.error, "evaluation_invalid");
     assert.deepEqual(
       (result.details as { invalid: Array<{ field: string }> }).invalid.map((item) => item.field),
-      ["success", "constraint_violations"],
+      ["outcome", "constraint_violations"],
     );
     const status = mgr.get(String(start.sessionId));
     assert.equal(status?.status, "running");
@@ -307,11 +323,10 @@ describe("MCP — multi-round lifecycle", async () => {
       sessionId: start.sessionId,
       submissionHandle: start.submissionHandle,
       evaluation: {
-        success: false,
+        outcome: "failed",
         output_summary: "core report is valid",
         constraint_violations: [],
         should_continue: true,
-        outcome: 42,
         blocker: ["invalid optional value"],
       },
     });
@@ -334,16 +349,16 @@ describe("MCP — multi-round lifecycle", async () => {
       const advanced = await toolNext(mgr, {
         sessionId,
         submissionHandle,
-        output: agentOutput({ success: false, shouldContinue: true }),
-        evaluation: evalParam({ success: false, shouldContinue: true }),
+        output: agentOutput({ outcome: "failed", shouldContinue: true }),
+        evaluation: evalParam({ outcome: "failed", shouldContinue: true }),
       });
       submissionHandle = advanced.submissionHandle;
     }
     const r3 = await toolNext(mgr, {
       sessionId,
       submissionHandle,
-      output: agentOutput({ success: false, shouldContinue: true }),
-      evaluation: evalParam({ success: false, shouldContinue: true }),
+      output: agentOutput({ outcome: "failed", shouldContinue: true }),
+      evaluation: evalParam({ outcome: "failed", shouldContinue: true }),
     });
 
     // Loop continues — no false-positive circuit breaker.
@@ -363,8 +378,8 @@ describe("MCP — multi-round lifecycle", async () => {
     const r1 = await toolNext(mgr, {
       sessionId,
       submissionHandle: start.submissionHandle,
-      output: agentOutput({ success: false, violations: ["x"], shouldContinue: true }),
-      evaluation: evalParam({ success: false, violations: ["x"], shouldContinue: true }),
+      output: agentOutput({ outcome: "failed", violations: ["x"], shouldContinue: true }),
+      evaluation: evalParam({ outcome: "failed", violations: ["x"], shouldContinue: true }),
     });
     assert.equal(r1.stopReason, undefined);
 
@@ -372,8 +387,8 @@ describe("MCP — multi-round lifecycle", async () => {
     const r2 = await toolNext(mgr, {
       sessionId,
       submissionHandle: r1.submissionHandle,
-      output: agentOutput({ success: true, shouldContinue: true }),
-      evaluation: evalParam({ success: true, shouldContinue: true }),
+      output: agentOutput({ outcome: "partial", shouldContinue: true }),
+      evaluation: evalParam({ outcome: "partial", shouldContinue: true }),
     });
     assert.equal(r2.prompt, null);
     assert.equal(r2.stopReason, "max_rounds");
@@ -389,7 +404,7 @@ describe("MCP — multi-round lifecycle", async () => {
     const r1 = await toolNext(mgr, {
       sessionId,
       submissionHandle: start.submissionHandle,
-      evaluation: evalParam({ success: true, shouldContinue: true }),
+      evaluation: evalParam({ outcome: "partial", shouldContinue: true }),
     });
     assert.equal(r1.stopReason, undefined, "should advance without output");
     assert.equal(r1.round, 2);
@@ -404,7 +419,7 @@ describe("MCP — multi-round lifecycle", async () => {
       sessionId,
       submissionHandle: start.submissionHandle,
       output: "Some raw output text without eval block",
-      evaluation: evalParam({ success: false, violations: ["v1"], shouldContinue: true }),
+      evaluation: evalParam({ outcome: "failed", violations: ["v1"], shouldContinue: true }),
     });
     assert.equal(r1.stopReason, undefined);
     assert.equal(r1.round, 2);
@@ -417,7 +432,7 @@ describe("MCP — multi-round lifecycle", async () => {
     const r1 = await toolNext(mgr, {
       sessionId,
       submissionHandle: start.submissionHandle,
-      evaluation: evalParam({ success: true, shouldContinue: false }),
+      evaluation: evalParam({ outcome: "success", shouldContinue: false }),
     });
     assert.equal(r1.prompt, null);
     assert.equal(r1.stopReason, "completed");
@@ -444,15 +459,15 @@ describe("MCP — multi-round lifecycle", async () => {
       sessionId,
       submissionHandle: start.submissionHandle,
       evaluation: {
-        success: false,
+        outcome: "failed",
         output_summary: "Found 2 reentrancy bugs, fixed 1.",
         constraint_violations: [],
         should_continue: true,
         discovered_constraints: ["All external calls must use SafeERC20"],
         execution_report: {
           files_changed: ["Token.sol"],
-          tests_reported: { passed: 20, failed: 2, skipped: 0 },
-          criterion_claims: criterionClaims(["Reentrancy guard added to withdraw()"], ["Reentrancy guard for deposit()", "Access control audit"]),
+
+          claims: criterionClaims(["Reentrancy guard added to withdraw()"], ["Reentrancy guard for deposit()", "Access control audit"]),
         },
       },
     });
@@ -463,14 +478,14 @@ describe("MCP — multi-round lifecycle", async () => {
       sessionId,
       submissionHandle: r1.submissionHandle,
       evaluation: {
-        success: true,
+        outcome: "success",
         output_summary: "All reentrancy bugs fixed. 24/24 tests pass.",
         constraint_violations: [],
         should_continue: false,
         execution_report: {
           files_changed: ["Token.sol"],
-          tests_reported: { passed: 24, failed: 0, skipped: 0 },
-          criterion_claims: criterionClaims(["Reentrancy guard for deposit()", "Access control audit"], []),
+
+          claims: criterionClaims(["Reentrancy guard for deposit()", "Access control audit"], []),
         },
       },
     });
@@ -493,7 +508,7 @@ describe("MCP — multi-round lifecycle", async () => {
     const recovered = await toolNext(mgr, {
       sessionId,
       submissionHandle: start.submissionHandle,
-      evaluation: evalParam({ success: false, shouldContinue: true }),
+      evaluation: evalParam({ outcome: "failed", shouldContinue: true }),
     });
     assert.notEqual(recovered.stopReason, "stalled",
       "the corrected resubmission must be processed normally");
@@ -514,14 +529,14 @@ describe("MCP — multi-round lifecycle", async () => {
     assert.equal(start.contextMode, "fresh_invocation");
     assert.equal(start.contextReason, "first_round");
     const violationEval = (round: number, summary: string): Record<string, unknown> => ({
-      success: false,
+      outcome: "failed",
       output_summary: summary,
       should_continue: true,
       constraint_violations: ["Violate X"],
       execution_report: {
         files_changed: [`src/r${round}.ts`],
-        tests_reported: { passed: 1, failed: 0, skipped: 0 },
-        criterion_claims: criterionClaims([], ["Complete the task"]),
+
+        claims: criterionClaims([], ["Complete the task"]),
       },
     });
 
@@ -605,8 +620,8 @@ describe("MCP — session persistence (save / resume)", async () => {
 
     // Advance round 1 → compiles round 2
     const r2 = await advanceWithHeld(mgr, sessionId, agentOutput({
-      success: false, shouldContinue: true,
-    }), evalParam({ success: false, shouldContinue: true }));
+      outcome: "failed", shouldContinue: true,
+    }), evalParam({ outcome: "failed", shouldContinue: true }));
     assert.ok(r2.prompt !== null);
     assert.equal(r2.round, 2);
 
@@ -624,8 +639,8 @@ describe("MCP — session persistence (save / resume)", async () => {
     const sessionId = r1.sessionId;
 
     await advanceWithHeld(mgr, sessionId, agentOutput({
-      success: true, shouldContinue: false,
-    }), evalParam({ success: true, shouldContinue: false }));
+      outcome: "success", shouldContinue: false,
+    }), evalParam({ outcome: "success", shouldContinue: false }));
 
     const entries = queryLoopEntries(store, "complete-persist", { prefix: "loop:complete-persist:session" });
     const sessionEntry = entries.find((e) => e.task_type === "session_state");
@@ -675,8 +690,8 @@ describe("MCP — session persistence (save / resume)", async () => {
     // Create and advance one round → simulates process dying after round 2 compile
     const r1 = await mgr.create({ task: "Test task", loopId: "resume-mid" });
     const r2 = await advanceWithHeld(mgr, r1.sessionId, agentOutput({
-      success: true, shouldContinue: true,
-    }), evalParam({ success: true, shouldContinue: true }));
+      outcome: "partial", shouldContinue: true,
+    }), evalParam({ outcome: "partial", shouldContinue: true }));
     assert.equal(r2.round, 2);
     assert.ok(r2.prompt !== null);
 
@@ -694,8 +709,8 @@ describe("MCP — session persistence (save / resume)", async () => {
     const loopId = "resume-recompile";
     const r1 = await mgr.create({ task: "Test task", loopId });
     const r2 = await advanceWithHeld(mgr, r1.sessionId, agentOutput({
-      success: false, shouldContinue: true,
-    }), evalParam({ success: false, shouldContinue: true }));
+      outcome: "failed", shouldContinue: true,
+    }), evalParam({ outcome: "failed", shouldContinue: true }));
     assert.equal(r2.level, "l1",
       "machine command activity keeps a failed round at normal density");
     assert.ok(r2.prompt);
@@ -726,8 +741,8 @@ describe("MCP — session persistence (save / resume)", async () => {
   it("resume() returns stopped result for completed loop", async () => {
     const r1 = await mgr.create({ task: "Test task", loopId: "resume-done" });
     await advanceWithHeld(mgr, r1.sessionId, agentOutput({
-      success: true, shouldContinue: false,
-    }), evalParam({ success: true, shouldContinue: false }));
+      outcome: "success", shouldContinue: false,
+    }), evalParam({ outcome: "success", shouldContinue: false }));
 
     const mgr2 = new SessionManager(store);
     const resumed = await mgr2.resume("resume-done");
@@ -750,8 +765,8 @@ describe("MCP — session persistence (save / resume)", async () => {
     const live = await advanceWithHeld(
       mgr,
       started.sessionId,
-      agentOutput({ success: true, shouldContinue: false }),
-      evalParam({ success: true, shouldContinue: false }),
+      agentOutput({ outcome: "success", shouldContinue: false }),
+      evalParam({ outcome: "success", shouldContinue: false }),
     );
     assert.equal(live.stopReason, "completed");
     assert.ok(String(live.stopDetail).includes("loop_stop_reason: completed"));
@@ -834,8 +849,8 @@ describe("MCP — session persistence (save / resume)", async () => {
     await advanceWithHeld(
       mgr,
       started.sessionId,
-      agentOutput({ success: true, shouldContinue: false }),
-      evalParam({ success: true, shouldContinue: false }),
+      agentOutput({ outcome: "success", shouldContinue: false }),
+      evalParam({ outcome: "success", shouldContinue: false }),
     );
     mgr.close();
     const mgr2 = new SessionManager(store);
@@ -844,7 +859,7 @@ describe("MCP — session persistence (save / resume)", async () => {
     assert.equal(status.ok, true);
     assert.equal(status.status, "stopped");
     assert.equal(status.loopStopReason, "completed");
-    assert.equal(status.agentStopReason, null);
+    assert.equal(status.agentOutcome, "success");
     assert.equal(status.agentShouldContinue, false);
     assert.match(String(status.stopDetail), /Agent report/);
     assert.match(String(status.stopDetail), /Machine evidence/);
@@ -908,14 +923,14 @@ describe("MCP — session persistence (save / resume)", async () => {
     const start = await mgr.create({ task: "Stopped test", loopId: "auto-resume-stopped" });
     const sid = String(start.sessionId);
     await advanceWithHeld(mgr, sid, "done", {
-      success: true,
+      outcome: "success",
       output_summary: "All done",
       constraint_violations: [],
       should_continue: false,  // triggers completed → status="stopped"
       execution_report: {
         files_changed: ["src/test.ts"],
-        tests_reported: { passed: 1, failed: 0, skipped: 0 },
-        criterion_claims: criterionClaims([], []),
+
+        claims: criterionClaims([], []),
       },
     } as SelfEvaluation);
 
@@ -955,15 +970,17 @@ describe("MCP — status / list / stop / replay", async () => {
     await toolNext(mgr, {
       sessionId,
       submissionHandle: start.submissionHandle,
-      output: agentOutput({ success: true, shouldContinue: true }),
-      evaluation: evalParam({ success: true, shouldContinue: true }),
+      output: agentOutput({ outcome: "partial", shouldContinue: true }),
+      evaluation: evalParam({ outcome: "partial", shouldContinue: true }),
     });
 
     const status = await TOOL_HANDLERS.loopforge_status(mgr, { sessionId });
     assert.equal(status.sessionId, sessionId);
     assert.equal(status.round, 2);
     assert.equal(status.status, "running");
-    assert.ok((status.machineBackedSuccessTrajectory as boolean[]).length >= 1);
+    // v4.0.6: outcome=success must stop, so a RUNNING session has no
+    // machine-backed success round yet; the trajectory is an empty, real list.
+    assert.deepEqual(status.machineBackedSuccessTrajectory, []);
   });
 
   it("status view=session resolves the durable loopId to the live session", async () => {
@@ -1026,7 +1043,7 @@ describe("MCP — status / list / stop / replay", async () => {
       mgr,
       String(start.sessionId),
       "",
-      evalParam({ success: false, shouldContinue: true }),
+      evalParam({ outcome: "failed", shouldContinue: true }),
     );
 
     const receipt = mgr.getLastSubmissionReceiptByLoopId("receipt-by-loop");
@@ -1056,12 +1073,13 @@ describe("MCP — status / list / stop / replay", async () => {
     const start = await TOOL_HANDLERS.loopforge_start(mgr, { task: "Stop test" });
     const sessionId = String(start.sessionId);
 
-    // Advance once with a machine-backed success so the trajectory is real.
+    // Advance once. Under v4.0.6 a success claim must stop, so this running
+    // round is partial and contributes no machine-backed success.
     await toolNext(mgr, {
       sessionId,
       submissionHandle: start.submissionHandle,
-      output: agentOutput({ success: true, shouldContinue: true }),
-      evaluation: evalParam({ success: true, shouldContinue: true }),
+      output: agentOutput({ outcome: "partial", shouldContinue: true }),
+      evaluation: evalParam({ outcome: "partial", shouldContinue: true }),
     });
 
     const result = await TOOL_HANDLERS.loopforge_stop(mgr, { sessionId });
@@ -1076,7 +1094,7 @@ describe("MCP — status / list / stop / replay", async () => {
       (result.machineBackedSuccessTrajectory as boolean[]).length,
       "the count and the trajectory come from the same committed view",
     );
-    assert.ok((result.machineBackedSuccessTrajectory as boolean[]).length >= 1);
+    assert.deepEqual(result.machineBackedSuccessTrajectory, []);
 
     // Session should be gone
     const status = await TOOL_HANDLERS.loopforge_status(mgr, { sessionId });
@@ -1105,14 +1123,14 @@ describe("MCP — status / list / stop / replay", async () => {
       const second = await toolNext(mgr, {
         sessionId: start.sessionId,
         submissionHandle: start.submissionHandle,
-        output: agentOutput({ success: true, shouldContinue: true }),
-        evaluation: evalParam({ success: true, shouldContinue: true }),
+        output: agentOutput({ outcome: "partial", shouldContinue: true }),
+        evaluation: evalParam({ outcome: "partial", shouldContinue: true }),
       });
       await toolNext(mgr, {
         sessionId: start.sessionId,
         submissionHandle: second.submissionHandle,
-        output: agentOutput({ success: true, shouldContinue: false }),
-        evaluation: evalParam({ success: true, shouldContinue: false }),
+        output: agentOutput({ outcome: "success", shouldContinue: false }),
+        evaluation: evalParam({ outcome: "success", shouldContinue: false }),
       });
       assert.equal(events.length, 1);
       const event = events[0]!;
@@ -1134,8 +1152,8 @@ describe("MCP — status / list / stop / replay", async () => {
     await toolNext(mgr, {
       sessionId,
       submissionHandle: start.submissionHandle,
-      output: agentOutput({ success: true, shouldContinue: true }),
-      evaluation: evalParam({ success: true, shouldContinue: true }),
+      output: agentOutput({ outcome: "partial", shouldContinue: true }),
+      evaluation: evalParam({ outcome: "partial", shouldContinue: true }),
     });
 
     const result = await TOOL_HANDLERS.loopforge_replay(mgr, { sessionId });
@@ -1263,14 +1281,14 @@ describe("MCP P0 lifecycle regressions", () => {
   let mgr: SessionManager;
 
   const continuingEvaluation = (): SelfEvaluation => ({
-    success: false,
+    outcome: "failed",
     output_summary: "partial",
     constraint_violations: [],
     should_continue: true,
     execution_report: {
       files_changed: [],
-      tests_reported: null,
-      criterion_claims: criterionClaims([], ["remaining"]),
+
+      claims: criterionClaims([], ["remaining"]),
     },
   });
 
@@ -1301,7 +1319,7 @@ describe("MCP P0 lifecycle regressions", () => {
     const next = await toolNext(restarted, {
       sessionId: resumedId,
       submissionHandle: resumed.submissionHandle,
-      evaluation: evalParam({ success: false, shouldContinue: false }),
+      evaluation: evalParam({ outcome: "failed", shouldContinue: false }),
     });
     assert.equal(next.stopReason, "failed");
   });
@@ -1320,7 +1338,7 @@ describe("MCP P0 lifecycle regressions", () => {
     const completed = await toolNext(mgr, {
       sessionId,
       submissionHandle: started.submissionHandle,
-      evaluation: evalParam({ success: true, shouldContinue: false }),
+      evaluation: evalParam({ outcome: "success", shouldContinue: false }),
     });
     assert.equal(completed.stopReason, "completed");
     // v3.2: an unverified success commits the loop but never enters the
@@ -1348,14 +1366,14 @@ describe("MCP P0 lifecycle regressions", () => {
     });
     const sessionId = started.sessionId;
     const evaluation = {
-      success: false,
+      outcome: "failed",
       output_summary: "partial",
       constraint_violations: [],
       should_continue: true,
       execution_report: {
         files_changed: [],
-        tests_reported: null,
-        criterion_claims: criterionClaims([], ["remaining"]),
+
+        claims: criterionClaims([], ["remaining"]),
       },
     } as SelfEvaluation;
 
@@ -1446,7 +1464,10 @@ describe("MCP P0 lifecycle regressions", () => {
     // Commit the round but deliberately skip SessionManager's state update,
     // simulating a process death between feedback commit and session save.
     const transaction = new RoundTransactionCoordinator(store);
-    const evaluation = continuingEvaluation();
+    const evaluation = withDefaultContract(
+      { evaluation: continuingEvaluation() },
+      { tag: "crash-r1" },
+    ).evaluation as SelfEvaluation;
     const committed = transaction.process({
       snapshot: session.roundSnapshot,
       task: session.task,
@@ -1481,14 +1502,14 @@ describe("MCP P0 lifecycle regressions", () => {
       maxRounds: 3,
     });
     const rejectedEvaluation: SelfEvaluation = {
-      success: true,
+      outcome: "success",
       output_summary: "premature success",
       constraint_violations: [],
-      should_continue: true,
+      should_continue: false,
       execution_report: {
         files_changed: ["src/change.ts"],
-        tests_reported: { passed: 1, failed: 0, skipped: 0 },
-        criterion_claims: criterionClaims([], [DEFAULT_SUCCESS_CRITERION]),
+
+        claims: criterionClaims([], [DEFAULT_SUCCESS_CRITERION]),
       },
     };
     const rejected = await advanceWithHeld(mgr, 
@@ -1663,14 +1684,14 @@ describe("MCP — input and output contract enforcement", () => {
     const advanced = await toolNext(mgr, {
       sessionId: String(first.sessionId),
       submissionHandle: first.submissionHandle,
-      evaluation: evalParam({ success: true }),
+      evaluation: evalParam({ outcome: "success", shouldContinue: false }),
     });
     assert.ok(!("error" in advanced));
   });
 
   it("rejects loopforge_next without a submissionHandle", async () => {
     const result = await TOOL_HANDLERS.loopforge_next(mgr, {
-      evaluation: evalParam({ success: true }),
+      evaluation: evalParam({ outcome: "success" }),
     });
     assert.ok("error" in result, "a missing submissionHandle must be rejected");
     assert.equal(result.error, "submission_handle_required");
@@ -1685,7 +1706,7 @@ describe("MCP — input and output contract enforcement", () => {
     const advanced = await toolNext(mgr, {
       sessionId,
       submissionHandle: start.submissionHandle,
-      evaluation: evalParam({ success: true, shouldContinue: true }),
+      evaluation: evalParam({ outcome: "partial", shouldContinue: true }),
     });
     assert.equal(advanced.round, 2);
     assert.ok(typeof advanced.prompt === "string");
@@ -1695,7 +1716,7 @@ describe("MCP — input and output contract enforcement", () => {
     const duplicate = await toolNext(mgr, {
       sessionId,
       submissionHandle: start.submissionHandle,
-      evaluation: evalParam({ success: true, shouldContinue: true }),
+      evaluation: evalParam({ outcome: "partial", shouldContinue: true }),
     });
     assert.equal(duplicate.round, 2, "round must not advance on a stale submission");
     assert.deepEqual(duplicate.submissionHandle, advanced.submissionHandle);
@@ -1715,7 +1736,7 @@ describe("MCP — input and output contract enforcement", () => {
     const final = await toolNext(mgr, {
       sessionId,
       submissionHandle: advanced.submissionHandle,
-      evaluation: evalParam({ success: true, shouldContinue: false }),
+      evaluation: evalParam({ outcome: "success", shouldContinue: false }),
     });
     assert.equal(final.stopReason, "completed");
   });
@@ -1775,8 +1796,8 @@ describe("MCP — v3.2 unverified success trajectory", () => {
     const advanced = await toolNext(mgr, {
       sessionId,
       submissionHandle: start.submissionHandle,
-      output: agentOutput({ success: true, shouldContinue: true }),
-      evaluation: evalParam({ success: true, shouldContinue: true }),
+      output: agentOutput({ outcome: "partial", shouldContinue: true }),
+      evaluation: evalParam({ outcome: "partial", shouldContinue: true }),
     });
     assert.equal(advanced.round, 2, "unverified success still advances the loop");
     const status = await TOOL_HANDLERS.loopforge_status(mgr, { sessionId });
@@ -1789,8 +1810,8 @@ describe("MCP — v3.2 unverified success trajectory", () => {
     const second = await toolNext(mgr, {
       sessionId,
       submissionHandle: advanced.submissionHandle,
-      output: agentOutput({ success: false, shouldContinue: true }),
-      evaluation: evalParam({ success: false, shouldContinue: true }),
+      output: agentOutput({ outcome: "failed", shouldContinue: true }),
+      evaluation: evalParam({ outcome: "failed", shouldContinue: true }),
     });
     const status2 = await TOOL_HANDLERS.loopforge_status(mgr, { sessionId });
     assert.deepEqual(status2.machineBackedSuccessTrajectory, [],
@@ -1868,7 +1889,7 @@ describe("MCP — tool contract (v3.2.1)", async () => {
     assert.doesNotThrow(() => {
       validateToolInput("loopforge_next", {
         submissionHandle: { sessionId: "s1", roundId: "r1", transactionId: "tx-1" },
-        evaluation: evalParam({ success: false, shouldContinue: true }),
+        evaluation: evalParam({ outcome: "failed", shouldContinue: true }),
       });
     });
 
@@ -1909,23 +1930,21 @@ describe("MCP — tool contract (v3.2.1)", async () => {
       validateToolInput("loopforge_next", {
         submissionHandle: { sessionId: "s1", roundId: "r1", transactionId: "tx-1" },
         evaluation: {
-          success: "false",
           output_summary: "invalid core",
           constraint_violations: [],
           should_continue: true,
         },
       });
-    }, /evaluation\.success must be boolean/);
+    }, /evaluation\.outcome is required/);
 
     assert.doesNotThrow(() => {
       validateToolInput("loopforge_next", {
         submissionHandle: { sessionId: "s1", roundId: "r1", transactionId: "tx-1" },
         evaluation: {
-          success: false,
+          outcome: "failed",
           output_summary: "valid core",
           constraint_violations: [],
           should_continue: true,
-          outcome: 42,
           execution_report: "malformed optional value",
         },
       });
@@ -1971,7 +1990,7 @@ describe("MCP — sub-goal persistence (v3.2.1)", async () => {
       sessionId,
       submissionHandle: start.submissionHandle,
       evaluation: {
-        success: false,
+        outcome: "failed",
         output_summary: "Finished the first step, hit a wall, dropped a step.",
         should_continue: true,
         constraint_violations: [],
@@ -1983,8 +2002,8 @@ describe("MCP — sub-goal persistence (v3.2.1)", async () => {
         ],
         execution_report: {
           files_changed: ["src/a.ts"],
-          tests_reported: { passed: 1, failed: 0, skipped: 0 },
-          criterion_claims: criterionClaims([], ["Complete the task"]),
+
+          claims: criterionClaims([], ["Complete the task"]),
         },
       },
     });
@@ -2013,15 +2032,15 @@ describe("MCP — sub-goal persistence (v3.2.1)", async () => {
       sessionId: start.sessionId,
       submissionHandle: start.submissionHandle,
       evaluation: {
-        success: false,
+        outcome: "failed",
         output_summary: "claimed a transition on a phantom goal",
         should_continue: true,
         constraint_violations: [],
         subgoal_updates: [{ id: "sg-00000000", status: "done" }],
         execution_report: {
           files_changed: ["src/a.ts"],
-          tests_reported: { passed: 1, failed: 0, skipped: 0 },
-          criterion_claims: criterionClaims([], ["Complete the task"]),
+
+          claims: criterionClaims([], ["Complete the task"]),
         },
       },
     });
@@ -2040,14 +2059,14 @@ describe("MCP — sub-goal persistence (v3.2.1)", async () => {
       sessionId: start.sessionId,
       submissionHandle: start.submissionHandle,
       evaluation: {
-        success: false,
+        outcome: "failed",
         output_summary: "fixed the payload",
         should_continue: true,
         constraint_violations: [],
         execution_report: {
           files_changed: ["src/a.ts"],
-          tests_reported: { passed: 1, failed: 0, skipped: 0 },
-          criterion_claims: criterionClaims([], ["Complete the task"]),
+
+          claims: criterionClaims([], ["Complete the task"]),
         },
       },
     });
@@ -2060,7 +2079,7 @@ describe("MCP — sub-goal persistence (v3.2.1)", async () => {
       sessionId: start.sessionId,
       submissionHandle: start.submissionHandle,
       evaluation: {
-        success: false,
+        outcome: "failed",
         output_summary: "created by ID literal",
         should_continue: true,
         constraint_violations: [],
@@ -2081,7 +2100,7 @@ describe("MCP — sub-goal persistence (v3.2.1)", async () => {
       sessionId: start.sessionId,
       submissionHandle: start.submissionHandle,
       evaluation: {
-        success: false,
+        outcome: "failed",
         output_summary: "emerged and started hardening the withdraw path",
         should_continue: true,
         constraint_violations: [],
@@ -2089,8 +2108,8 @@ describe("MCP — sub-goal persistence (v3.2.1)", async () => {
         subgoal_updates: [{ id: sgId, status: "in_progress" }],
         execution_report: {
           files_changed: ["src/withdraw.ts"],
-          tests_reported: { passed: 1, failed: 0, skipped: 0 },
-          criterion_claims: criterionClaims([], ["Complete the task"]),
+
+          claims: criterionClaims([], ["Complete the task"]),
         },
       },
     });
@@ -2122,7 +2141,7 @@ describe("MCP — sub-goal persistence (v3.2.1)", async () => {
       sessionId: start.sessionId,
       submissionHandle: start.submissionHandle,
       evaluation: {
-        success: false,
+        outcome: "failed",
         output_summary: "emerged more items than the intake carries",
         should_continue: true,
         constraint_violations: [],
@@ -2149,7 +2168,7 @@ describe("MCP — sub-goal persistence (v3.2.1)", async () => {
       sessionId: start.sessionId,
       submissionHandle: start.submissionHandle,
       evaluation: {
-        success: false,
+        outcome: "failed",
         output_summary: "reported a numeric note on a legal transition",
         should_continue: true,
         constraint_violations: [],
@@ -2157,8 +2176,8 @@ describe("MCP — sub-goal persistence (v3.2.1)", async () => {
         subgoal_updates: [{ id: sgId, status: "in_progress", note: 42 }],
         execution_report: {
           files_changed: ["src/withdraw.ts"],
-          tests_reported: { passed: 1, failed: 0, skipped: 0 },
-          criterion_claims: criterionClaims([], ["Complete the task"]),
+
+          claims: criterionClaims([], ["Complete the task"]),
         },
       },
     });
@@ -2207,15 +2226,15 @@ describe("MCP — sub-goal persistence (v3.2.1)", async () => {
       const blocked = await toolNext(mgr, {
         sessionId,
         evaluation: {
-          success: false,
+          outcome: "failed",
           output_summary: "Deployed but no human approved it yet.",
           should_continue: true,
           constraint_violations: [],
           gate_ids: [gateId],
           execution_report: {
             files_changed: ["deploy.yml"],
-            tests_reported: { passed: 1, failed: 0, skipped: 0 },
-            criterion_claims: criterionClaims([], ["Complete the task"]),
+
+            claims: criterionClaims([], ["Complete the task"]),
           },
         },
       });
@@ -2238,15 +2257,15 @@ describe("MCP — sub-goal persistence (v3.2.1)", async () => {
       const accepted = await toolNext(mgr, {
         sessionId,
         evaluation: {
-          success: false,
+          outcome: "failed",
           output_summary: "Deployed with an approved gate.",
           should_continue: true,
           constraint_violations: [],
           gate_ids: [gateId],
           execution_report: {
             files_changed: ["deploy.yml"],
-            tests_reported: { passed: 1, failed: 0, skipped: 0 },
-            criterion_claims: criterionClaims([], ["Complete the task"]),
+
+            claims: criterionClaims([], ["Complete the task"]),
           },
         },
       });
@@ -2276,7 +2295,7 @@ describe("MCP — Round Contract flow", async () => {
 
   it("round_contract passes the evaluation schema", () => {
     const input = evalParam({
-      success: false,
+      outcome: "failed",
       shouldContinue: true,
     });
     input.round_contract = {
@@ -2299,14 +2318,14 @@ describe("MCP — Round Contract flow", async () => {
     // Round 1's eval: honest partial progress + a declared contract for the
     // work the next round will execute under.
     const evalBlock = {
-      success: false,
+      outcome: "failed",
       output_summary: "Scaffolded auth; declared the round contract.",
       constraint_violations: [],
       should_continue: true,
       execution_report: {
         files_changed: ["src/auth.ts"],
-        tests_reported: { passed: 0, failed: 0, skipped: 0 },
-        criterion_claims: criterionClaims([], [DEFAULT_CRITERION_ID]),
+
+        claims: criterionClaims([], [DEFAULT_CRITERION_ID]),
       },
       round_contract: {
         work_item: "Implement login flow",
@@ -2334,7 +2353,7 @@ describe("MCP — Round Contract flow", async () => {
     // directly, with an item binding a command that is not configured.
     const r1 = await mgr.create({ task: "Build the auth module", loopId: "boundary-runtime" });
     const rejected = await advanceWithHeld(mgr, r1.sessionId, "Scaffolded.", {
-      success: false,
+      outcome: "failed",
       output_summary: "Scaffolded auth.",
       constraint_violations: [],
       should_continue: true,
@@ -2355,7 +2374,7 @@ describe("MCP — Round Contract flow", async () => {
 
   it("v3.9.5: a new contract without work_item is contract_invalid, then retries", async () => {
     const r1 = await mgr.create({ task: "Build the auth module", loopId: "contract-work-item" });
-    const invalid = evalParam({ success: false, shouldContinue: true });
+    const invalid = evalParam({ outcome: "failed", shouldContinue: true });
     invalid.round_contract = {
       scope: ["src/auth"],
       items: [{
@@ -2373,7 +2392,7 @@ describe("MCP — Round Contract flow", async () => {
       "the refusal names the missing deliverable",
     );
 
-    const valid = evalParam({ success: false, shouldContinue: true });
+    const valid = evalParam({ outcome: "failed", shouldContinue: true });
     valid.round_contract = {
       work_item: "Login flow is implemented",
       scope: ["src/auth"],
@@ -2427,12 +2446,15 @@ describe("MCP — Round Contract flow", async () => {
   });
 
   it("a contract-less round stays byte-identical to pre-contract rendering", async () => {
+    // No after-capable command: contract coverage does not apply, so the
+    // Current Task falls back to the working objective.
+    resetPolicy();
     const r1 = await mgr.create({ task: "Plain task", loopId: "contract-none" });
     const sessionId = r1.sessionId;
     const r2 = await advanceWithHeld(mgr, 
       sessionId,
-      agentOutput({ success: false }),
-      evalParam({ success: false, shouldContinue: true }),
+      agentOutput({ outcome: "failed" }),
+      evalParam({ outcome: "failed", shouldContinue: true }),
     );
     assert.ok(r2.prompt !== null);
     assert.ok(r2.prompt.includes("Plain task"), "original task stays the Current Task");
@@ -2457,14 +2479,14 @@ describe("MCP — Round Contract flow", async () => {
     remaining: string[],
     contract?: SelfEvaluation["round_contract"],
   ): SelfEvaluation => ({
-    success: false,
+    outcome: "failed",
     output_summary: "Worked the round.",
     constraint_violations: [],
     should_continue: true,
     execution_report: {
       files_changed: ["src/auth.ts"],
-      tests_reported: { passed: 1, failed: 0, skipped: 0 },
-      criterion_claims: criterionClaims(met, remaining),
+
+      claims: criterionClaims(met, remaining),
     },
     ...(contract ? { round_contract: contract } : {}),
   });
@@ -2492,30 +2514,22 @@ describe("MCP — Round Contract flow", async () => {
     // v3.9.4: a sub-goal must be committed/displayed before a contract can
     // cite it. Declare it in round 1, declare the contract in round 2.
     await advanceWithHeld(mgr, started.sessionId, "", {
-      success: false,
-      output_summary: "Declared the sub-goal.",
+      outcome: "failed",
+      output_summary: "Declared the sub-goal and the contract.",
       constraint_violations: [],
       should_continue: true,
       emerged_subtasks: ["wire the widget"],
-    });
-    await advanceWithHeld(mgr, started.sessionId, "", {
-      success: false,
-      output_summary: "Declared the contract.",
-      constraint_violations: [],
-      should_continue: true,
       round_contract: contract,
     });
-
     const stopped = await advanceWithHeld(mgr, started.sessionId, "", {
-      success: true,
+      outcome: "success",
       output_summary: "Verified the slice.",
       constraint_violations: [],
       should_continue: false,
       execution_report: {
         files_changed: [],
-        tests_reported: { passed: 1, failed: 0, skipped: 0 },
-        contract_item_claims: [{ item_id: itemId, outcome: "met" }],
-        criterion_claims: [],
+
+        claims: itemClaims([{ item_id: itemId, outcome: "met" }]),
       },
     });
     assert.equal(stopped.stopReason, "completed");
@@ -2547,14 +2561,13 @@ describe("MCP — Round Contract flow", async () => {
 
     // Round 2 submits a deterministic rejection (success with open criteria).
     const rejected = await advanceWithHeld(mgr, started.sessionId, "", {
-      success: true,
+      outcome: "success",
       output_summary: "premature success",
       constraint_violations: [],
-      should_continue: true,
+      should_continue: false,
       execution_report: {
         files_changed: ["src/auth.ts"],
-        tests_reported: { passed: 1, failed: 0, skipped: 0 },
-        criterion_claims: criterionClaims([], [DEFAULT_SUCCESS_CRITERION]),
+        claims: criterionClaims([], [DEFAULT_SUCCESS_CRITERION]),
       },
     });
     assert.equal(rejected.enforcementAction, "reject");
@@ -2582,14 +2595,14 @@ describe("MCP — Round Contract flow", async () => {
     // (the "verify" provider is installed for this suite and passes), so the
     // contract closes and the Current Task reverts to the original task.
     const r3 = await advanceWithHeld(mgr, started.sessionId, "", {
-      success: false,
+      outcome: "failed",
       output_summary: "Ran the bound verification command.",
       constraint_violations: [],
       should_continue: true,
       execution_report: {
         files_changed: ["src/auth.ts"],
-        tests_reported: { passed: 1, failed: 0, skipped: 0 },
-        contract_item_claims: [{ item_id: itemId, outcome: "met" }],
+
+        claims: itemClaims([{ item_id: itemId, outcome: "met" }]),
       },
     });
     assert.equal(r3.round, 3);
@@ -2599,7 +2612,7 @@ describe("MCP — Round Contract flow", async () => {
       "the closed contract must stop rendering");
   });
 
-  it("v3.4: a premature replacement is ignored — the open contract continues", async () => {
+  it("v4.0.6: a premature replacement is rejected — the open contract continues", async () => {
     const started = await mgr.create({
       task: "Build the auth module",
       loopId: "contract-premature-replace",
@@ -2609,18 +2622,21 @@ describe("MCP — Round Contract flow", async () => {
     const b = CONTRACT("Implement the admin panel");
     const r2 = await advanceWithHeld(mgr, started.sessionId, "", honest([], [DEFAULT_CRITERION_ID], a));
     assert.ok(String(r2.prompt ?? "").includes("**Implement login flow**"));
-    // Round 2 proposes B while A is still open (nothing met, not blocked) —
-    // the machine keeps A as the Current Task for round 3.
-    const r3 = await advanceWithHeld(mgr, started.sessionId, "", honest([], [DEFAULT_CRITERION_ID], b));
-    assert.equal(r3.round, 3);
-    assert.ok(String(r3.prompt ?? "").includes("**Implement login flow**"),
-      "the open ACTIVE contract must continue — B was premature");
-    assert.ok(!String(r3.prompt ?? "").includes("**Implement the admin panel**"));
-    // v3.5: the premature replacement is no longer silent — round 3's prompt
-    // flag lines carry the warn (the round still advanced; warn never
-    // rejects).
-    assert.ok(String(r3.prompt ?? "").includes("contract_premature"),
-      "the ignored replacement must be surfaced as a warn");
+    // v4.0.6: B is a different proposal while A is still open and carries no
+    // supersedes, so the round is rejected instead of silently saving B.
+    const rejected = await advanceWithHeld(mgr, started.sessionId, "", honest([], [DEFAULT_CRITERION_ID], b));
+    assert.equal(rejected.enforcementAction, "reject");
+    assert.match(String(rejected.enforcementReason ?? ""), /still open/);
+    assert.equal(rejected.stopReason, undefined, "a rejected attempt does not stop the loop");
+    assert.equal(
+      mgr.get(started.sessionId)?.currentRound,
+      2,
+      "the rejected attempt does not advance the round",
+    );
+    // The retry restates A unchanged; no supersedes is needed to continue it.
+    const retry = await advanceWithHeld(mgr, started.sessionId, "", honest([], [DEFAULT_CRITERION_ID], a));
+    assert.equal(retry.round, 3);
+    assert.ok(String(retry.prompt ?? "").includes("**Implement login flow**"));
   });
 
   it("v3.5: status exposes the active contract and replay rows carry the proposals", async () => {
@@ -2722,14 +2738,14 @@ describe("MCP — audit & vault replay (v3.3.1)", async () => {
       const advanced = await toolNext(mgr, {
         sessionId,
         evaluation: {
-          success: false,
+          outcome: "failed",
           output_summary: `Round ${i} progress`,
           constraint_violations: [],
           should_continue: true,
           execution_report: {
             files_changed: [`src/r${i}.ts`],
-            tests_reported: { passed: 1, failed: 0, skipped: 0 },
-            criterion_claims: criterionClaims([], ["Complete the task"]),
+
+            claims: criterionClaims([], ["Complete the task"]),
           },
         },
       });

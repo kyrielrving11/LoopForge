@@ -77,7 +77,7 @@ describe("Engine — Loop Compile mode", () => {
     const req = makeRequest({
       loop_id: "test",
       round: 1,
-      goal_id: "audit",
+
       task: "Audit ERC20 token",
     });
     const result = engine.invokeLoopCompile(req);
@@ -91,7 +91,7 @@ describe("Engine — Loop Compile mode", () => {
     const req = makeRequest({
       loop_id: "test",
       round: 1,
-      goal_id: "audit",
+
       task: "Audit ERC20 token",
       loop_objective: {
         objective: "Full security audit",
@@ -112,7 +112,7 @@ describe("Engine — Loop Compile mode", () => {
     const req = makeRequest({
       loop_id: "test-r2",
       round: 2,
-      goal_id: "audit",
+
       task: "Check approve race condition",
     });
     // Compiles at L2 when no prior lineage found
@@ -171,7 +171,7 @@ describe("Engine — P0-P5 Cognitive Evolution (v1.7 E2E)", () => {
     const req = makeRequest({
       loop_id: "vg-test",
       round: 2,
-      goal_id: "audit",
+
       task: "Audit ERC20",
     });
     const result = engine.invokeLoopCompile({
@@ -179,8 +179,8 @@ describe("Engine — P0-P5 Cognitive Evolution (v1.7 E2E)", () => {
       verification_flags: [
         { severity: "error", field: "success", check: "success_with_remaining_criteria",
           detail: "Agent claims success but 2 criteria remain unmet: Access control, Overflow" },
-        { severity: "warn", field: "blocker", check: "blocked_without_blocker",
-          detail: "outcome=blocked but no blocker description" },
+        { severity: "warn", field: "round_contract", check: "contract_items_unverified",
+          detail: "1 contract item claimed met but not machine-verified" },
       ],
     });
     assert.equal(result.status, AgentStatus.OK);
@@ -188,11 +188,11 @@ describe("Engine — P0-P5 Cognitive Evolution (v1.7 E2E)", () => {
     assert.ok(prompt.includes("Verification Gate"), "Gate section missing");
     assert.ok(prompt.includes("🚫"), "Error flag icon missing");
     assert.ok(prompt.includes("CONTRADICTED"), "Contradicted verdict message missing");
-    assert.ok(prompt.includes("blocked_without_blocker"), "Warn flag check name missing");
+    assert.ok(prompt.includes("contract_items_unverified"), "Warn flag check name missing");
     // v3.2: error/warn flags carry actionable continuation lines.
     assert.ok(prompt.includes("→ Fix: Complete the remaining criteria"),
       "error flag must carry a Fix instruction");
-    assert.ok(prompt.includes("→ Action: State the concrete blocker"),
+    assert.ok(prompt.includes("→ Action: Run the bound command(s)"),
       "warn flag must carry an Action instruction");
   });
 });

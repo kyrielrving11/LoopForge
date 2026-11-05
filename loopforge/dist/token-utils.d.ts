@@ -78,21 +78,26 @@ export declare function normalizeText(text: string): string;
  *  position alongside the other pure token helpers. */
 export interface ContractIdentityItem {
     description: string;
-    criterion_refs: string[];
+    /** v4.0.6: optional (defaults to `[]`), matching the runtime and schema. */
+    criterion_refs?: string[];
     verify_with: string[];
 }
-/** v3.8: Canonical form of a contract proposal. Identity is CONTENT only —
- *  restating an unchanged contract keeps the same rc-/rci- ids, unlike a
- *  SubGoal whose id includes its declaration round. Array order is part of
+/** v3.8 / v4.0.6: Canonical form of a contract proposal. Identity is CONTENT
+ *  only — restating an unchanged contract keeps the same rc-/rci- ids, unlike
+ *  a SubGoal whose id includes its declaration round. Array order is part of
  *  the identity.
  *
  *  v3.9.5: `work_item` is the slice's deliverable label (optional in this
- *  legacy-readable type); the item list is the acceptance surface. */
+ *  legacy-readable type); the item list is the acceptance surface.
+ *
+ *  v4.0.6: `scope` and `supersedes` are report-only modifiers and are NOT
+ *  part of `rc-` identity — changing either keeps the same contract id.
+ *  Structural (not imported from protocol.ts) so this module keeps its
+ *  zero-dependency position. */
 export declare function canonicalContractText(contract: {
     work_item?: string;
-    /** v3.9.9: scope is optional and report-only. Omission and `[]` both mean
-     *  "no declared intent", so they keep the same content identity. */
     scope?: string[];
+    supersedes?: unknown;
     items: ContractIdentityItem[];
 }): string;
 /** v3.8: rc-XXXXXXXX — loopId + canonical content. */

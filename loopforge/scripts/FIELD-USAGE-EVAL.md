@@ -10,8 +10,8 @@ unit-test result and the real-run result separately.
 
 ## What to compare
 
-Run the same sample tasks against the pre-change build (3.9.2) and the
-post-change build (3.9.3), with the same agent/model/harness and the same task
+Run the same sample tasks against the pre-change build (4.0.5) and the
+post-change build (4.0.6), with the same agent/model/harness and the same task
 text. Keep at least three runs per build when the task is stochastic.
 
 ## Prompt-level sequence
@@ -30,7 +30,10 @@ For every run, record per round:
 - whether the L0 prompt offered the same applicable trigger set as L1/L2,
   including the real `cr-`/`rci-`/`sg-` ids;
 - whether `round_contract` was proposed using the current requirement and a
-  real command, and whether it became the next round's Current Task;
+  real command, whether it became the next round's Current Task, and whether
+  every continuing round left an active contract for the next round;
+- whether the overall working objective genuinely evolved and was reported as
+  `objective_refinement` (event-driven, never a per-round requirement);
 - whether `submission_receipt.files_reconciliation: mismatch` produced a
   concrete fix action in the next prompt and disappeared after a corrected
   report.
@@ -44,10 +47,12 @@ Use these labeled opportunity points in each sample task:
 | A sub-problem appears | `emerged_subtasks` | A new `sg-` id is created and survives later rounds |
 | A sub-goal changes status | `subgoal_updates` | The exact rendered `sg-` id reaches the expected status |
 | A worker result returns | `worker_results` | The report is stored; its `discoveredConstraints` does **not** enter the active set |
-| A contract slice is planned | `round_contract` | A proposal is committed and activates on the next round; its items close by machine evidence |
-| A criterion is met | `criterion_claims` / `contract_item_claims` | The claim cites a real `cr-` id/text from the prompt; unknown references are dropped with a diagnostic; verification status is derived by the machine |
+| A contract slice is planned | `round_contract` | A proposal is committed and activates on the next round; its items close by machine evidence; a continuing round never leaves the next round without a contract |
+| The overall objective genuinely evolves | `objective_refinement` | The text becomes the working objective on the next prompt/goalId; criteria and hard constraints still come from operator acceptance |
+| A criterion is met | `execution_report.claims` with a `cr-` id | The claim cites a real `cr-` id from the prompt; unknown references are dropped with a diagnostic; verification status is derived by the machine |
+| An active contract item is claimed | `execution_report.claims` with an `rci-` id | The cited id must belong to the ACTIVE contract; a claim alone never verifies it |
 | Files changed | `execution_report.files_changed` | The receipt's `files_reconciliation` reports match/mismatch/unknown/not_applicable with reported/observed sets |
-| A round is blocked | `outcome`, `blocker` | The Agent's `agent_stop_reason` is `blocked` and the blocker is retained |
+| A round is blocked | `outcome`, `blocker` | The Agent declares `outcome=blocked` with `should_continue=false` and a non-empty blocker; the blocker is retained |
 | No event in this round | none of the above | No optional field is fabricated; diagnostics stay empty |
 
 Control rounds: include at least one round per task where no labeled event

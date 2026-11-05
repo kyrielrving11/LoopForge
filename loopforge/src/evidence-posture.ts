@@ -210,7 +210,7 @@ function contractEntry(
   if (!statuses.contractId) return { contract: null, omitted: 0 };
   const criterionRefsById = new Map(
     (activeContract?.items ?? []).map((item) =>
-      [item.id, [...item.criterion_refs]] as const),
+      [item.id, [...(item.criterion_refs ?? [])]] as const),
   );
   const items = statuses.items
     .map((item) => ({

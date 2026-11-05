@@ -13,7 +13,11 @@
  *  diagnostics remain visible in the receipt.
  */
 
-import type { SelfEvaluation, SubmissionDiagnostic } from "./protocol.js";
+import type {
+  ExecutionReport,
+  SelfEvaluation,
+  SubmissionDiagnostic,
+} from "./protocol.js";
 import {
   ARRAY_SELF_EVALUATION_FIELDS,
   FIELD_ORDER,
@@ -44,8 +48,6 @@ const ROUND_CONTRACT_WHOLE_DROP_CODES = new Set([
   "invalid_entry",
   DIAG_ALL_ENTRIES_DROPPED,
 ]);
-const TESTS_WHOLE_DROP_CODES = new Set(["invalid_value", "invalid_entry"]);
-
 function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -55,7 +57,7 @@ function fieldValue(evaluation: SelfEvaluation, path: FieldPath): unknown {
     const report = evaluation.execution_report;
     if (!report) return undefined;
     const key = path.slice("execution_report.".length) as
-      "files_changed" | "tests_reported" | "contract_item_claims" | "criterion_claims";
+      keyof ExecutionReport;
     return report[key];
   }
   return (evaluation as unknown as Record<string, unknown>)[path];
@@ -69,9 +71,6 @@ function wholeDrop(
     (diagnostic) => diagnostic.path === path && diagnostic.handling === "dropped",
   );
   if (exact.length === 0) return false;
-  if (path === "execution_report.tests_reported") {
-    return exact.some((diagnostic) => TESTS_WHOLE_DROP_CODES.has(diagnostic.code));
-  }
   if (path === "round_contract") {
     return exact.some((diagnostic) =>
       ROUND_CONTRACT_WHOLE_DROP_CODES.has(diagnostic.code));
@@ -98,7 +97,6 @@ function hasValue(path: FieldPath, value: unknown): boolean {
 }
 
 function positiveValue(path: FieldPath, value: unknown): boolean {
-  if (path === "execution_report.tests_reported") return isObject(value);
   if (path === "round_contract") {
     return isObject(value) && Array.isArray(value.items) && value.items.length > 0;
   }
@@ -126,9 +124,7 @@ export function deriveFieldAccounting(source: FieldAccountingSource): FieldAccou
     const dropped = wholeDrop(path, source.normalizationDiagnostics);
     const kept = truncated
       ? positiveValue(path, value) && !dropped
-      : path === "execution_report.tests_reported"
-        ? source.evaluation.execution_report !== undefined && !dropped
-        : hasValue(path, value) && !dropped;
+      : hasValue(path, value) && !dropped;
     if (kept) {
       retained.push(path);
     } else if (!dropped && !truncated) {

@@ -36,19 +36,14 @@ export interface ExplainRound {
     transactionId?: string;
     action: string;
     /** v4.0.4: LoopForge's committed terminal reason, when the round stopped the
-     *  loop. Renamed from `stopReason` so it cannot be read as the Agent's
-     *  `agent_stop_reason`. */
+     *  loop. Renamed from `stopReason` so it cannot be read as the Agent's round
+     *  outcome/blocker report. */
     loopStopReason: StopReason | null;
     /** v4.0.3: the Agent's claim (never a machine verdict). */
     agentSuccessClaim: boolean;
-    /** v4.0.3: the effective Agent-declared outcome. */
+    /** v4.0.6: the Agent-declared outcome (always declared). */
     agentOutcome: RoundOutcome | null;
-    /** v4.0.4: the raw `evaluation.outcome`; null means it was derived from
-     *  `success`, not declared. */
-    agentOutcomeDeclared: RoundOutcome | null;
-    /** v4.0.4: the Agent's declared stop reason (an Agent report). */
-    agentStopReason: "gave_up" | "blocked" | "needs_human_input" | null;
-    /** v4.0.4: the Agent's declared should_continue. */
+    /** v4.0.6: the Agent's declared should_continue. */
     agentShouldContinue: boolean | null;
     /** v4.0.3: the ONE persisted posture. `machineBackedSuccess` lives only
      *  inside it; Explain no longer repeats it at the top level. */
@@ -69,12 +64,11 @@ export interface ExplainRound {
         output_summary: string;
         no_change_reason: string | null;
         subtask_boundary_label: string | null;
-        criterion_claims: Array<{
-            criterion_id: string;
-            outcome: string;
-        }>;
-        contract_item_claims: Array<{
-            item_id: string;
+        /** v4.0.6: the working objective the Agent refined this round, verbatim. */
+        objective_refinement: string | null;
+        /** v4.0.6: the ONE claims channel (`cr-`/`rci-`). */
+        claims: Array<{
+            id: string;
             outcome: string;
         }>;
         worker_results: Array<{
@@ -170,7 +164,6 @@ export interface ExplainRound {
     } | null;
     /** v4.0.3: this round's explicit contract redirect, report-only. */
     contractRedirect: {
-        kind: "supersede";
         contract_id: string;
         reason?: string;
     } | null;

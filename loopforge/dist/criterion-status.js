@@ -11,8 +11,8 @@
  *  `submission-guidance.ts`, so the reverse import would be a cycle. */
 import { criterionRefMatches, deriveCriterionId, } from "./token-utils.js";
 function claimsFor(view, text) {
-    return (view.executionReport?.criterion_claims ?? [])
-        .filter((claim) => criterionRefMatches(claim.criterion_id, text))
+    return (view.executionReport?.claims ?? [])
+        .filter((claim) => claim.id.startsWith("cr-") && criterionRefMatches(claim.id, text))
         .map((claim) => claim.outcome);
 }
 /** v3.2/v4.0.3: Derive per-criterion status — the "goal → criteria →

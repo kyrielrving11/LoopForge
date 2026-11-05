@@ -130,7 +130,7 @@ describe("RoundDriver", () => {
       1,
     );
     const eval1 = makeSelfEvaluation({
-      success: true,
+      outcome: "partial",
       output_summary: "Implemented the parser.",
       constraint_violations: [],
       should_continue: true,
@@ -143,9 +143,12 @@ describe("RoundDriver", () => {
       ],
       execution_report: makeExecutionReport({
         files_changed: ["src/a.ts"],
-        tests_reported: { passed: 1, failed: 0, skipped: 0 },
-        criterion_claims: criterionClaims(["cr-11111111", "Parser handles edge cases"], []),
+        claims: criterionClaims(["cr-11111111", "Parser handles edge cases"], []),
       }),
+      round_contract: {
+        work_item: "parser slice",
+        items: [{ description: "parser works", verify_with: ["verify"] }],
+      },
     });
     const c1 = await driver.complete({
       snapshot: p1!.snapshot,
@@ -194,15 +197,18 @@ describe("RoundDriver", () => {
         task: request(loopId).task,
         maxRounds: 4,
         selfEval: makeSelfEvaluation({
-          success: false,
+          outcome: "failed",
           output_summary: "Implemented the durable boundary.",
           constraint_violations: [],
           should_continue: true,
           execution_report: makeExecutionReport({
             files_changed: ["src/store.ts"],
-            tests_reported: { passed: 1, failed: 0, skipped: 0 },
-            criterion_claims: criterionClaims([], ["Finish the task"]),
+            claims: criterionClaims([], ["Finish the task"]),
           }),
+          round_contract: {
+            work_item: "store slice",
+            items: [{ description: "store works", verify_with: ["verify"] }],
+          },
         }),
         consecutiveRejections: 0,
         });

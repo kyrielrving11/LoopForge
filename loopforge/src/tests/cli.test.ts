@@ -211,13 +211,13 @@ describe("loopforge CLI", () => {
                 constraintsRetired: [],
               },
               evaluation: {
-                success: false,
+                outcome: "failed",
                 output_summary: "Scaffolded the module.",
                 constraint_violations: [],
                 should_continue: true,
               },
               submittedFields: [
-                "success", "output_summary", "constraint_violations", "should_continue",
+                "outcome", "output_summary", "constraint_violations", "should_continue",
               ],
               createdAt: 0,
               updatedAt: 0,
@@ -226,6 +226,7 @@ describe("loopforge CLI", () => {
               action: "continue",
               verificationFlags: [],
               agentSuccessClaim: false,
+              agentOutcome: "failed",
               evidencePosture: fixtureEvidencePosture(1),
             },
           },

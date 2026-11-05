@@ -13,7 +13,7 @@ import { validateSubmission } from "../mcp/submission-boundary.js";
 import { MemoryLoopStore } from "./_helpers.js";
 
 const base = {
-  success: false,
+  outcome: "failed",
   output_summary: "made progress",
   constraint_violations: [],
   should_continue: true,
@@ -55,7 +55,11 @@ const OPPORTUNITIES: Opportunity[] = [
   },
   {
     name: "the round is blocked",
-    payload: { outcome: "blocked", blocker: "missing credentials" },
+    payload: {
+      outcome: "blocked",
+      blocker: "missing credentials",
+      should_continue: false,
+    },
     field: "outcome",
   },
 ];
@@ -87,7 +91,7 @@ describe("v3.9.1 — labeled field opportunities", () => {
     const normalized = normalizeSelfEvaluation({ ...base });
     assert.deepEqual(normalized.diagnostics, []);
     assert.deepEqual(normalized.submittedFields, [
-      "success", "output_summary", "constraint_violations", "should_continue",
+      "outcome", "output_summary", "constraint_violations", "should_continue",
     ]);
   });
 

@@ -159,7 +159,8 @@ export class ReplayBackend {
             const retractedConstraints = displayedList(view.retractedConstraints, ASSUMPTION_DISPLAY_CHARS);
             const openQuestions = displayedList(view.openQuestions, QUESTION_DISPLAY_CHARS);
             const blocker = displayed(view.evaluation?.blocker, BLOCKER_DISPLAY_CHARS);
-            const redirectReason = displayed(view.contractTransition?.reason, REDIRECT_REASON_DISPLAY_CHARS);
+            const redirectReason = displayed(view.contractRedirect?.reason, REDIRECT_REASON_DISPLAY_CHARS);
+            const objectiveRefinement = displayed(view.objectiveRefinement, REPORT_DISPLAY_CHARS);
             const noChangeReason = displayed(view.evaluation?.no_change_reason, BLOCKER_DISPLAY_CHARS);
             const subtaskLabel = displayed(view.evaluation?.subtask_boundary_label, SUBTASK_LABEL_DISPLAY_CHARS);
             const constraintViolations = displayedList(view.constraintViolations, ASSUMPTION_DISPLAY_CHARS);
@@ -219,7 +220,7 @@ export class ReplayBackend {
                 // machine boolean is rendered here.
                 agent_success_claim: view.agentSuccessClaim,
                 agent_outcome: view.agentOutcome,
-                agent_stop_reason: view.evaluation?.agent_stop_reason ?? null,
+                objective_refinement: objectiveRefinement.text || null,
                 evidence_posture: view.evidencePosture,
                 // v4.0.1: task and goal identity are compile facts stamped at commit.
                 task: view.compiled?.task ?? "",
@@ -288,11 +289,10 @@ export class ReplayBackend {
                 // when it committed one — lets replay show the contract arc.
                 ...(view.contractProposal ? { proposal: view.contractProposal } : {}),
                 // v3.9.9/v4.0.2: the committed redirect, report-only.
-                contract_redirect: view.contractTransition
+                contract_redirect: view.contractRedirect
                     ? {
-                        kind: view.contractTransition.kind,
-                        contract_id: view.contractTransition.contract_id,
-                        ...(view.contractTransition.reason !== undefined
+                        contract_id: view.contractRedirect.contract_id,
+                        ...(view.contractRedirect.reason !== undefined
                             ? { reason: redirectReason.text }
                             : {}),
                     }
@@ -304,6 +304,7 @@ export class ReplayBackend {
                     openQuestions.truncated ||
                     blocker.truncated ||
                     redirectReason.truncated ||
+                    objectiveRefinement.truncated ||
                     noChangeReason.truncated ||
                     subtaskLabel.truncated ||
                     constraintViolations.truncated ||

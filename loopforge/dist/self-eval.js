@@ -94,19 +94,6 @@ export const EMERGED_LIMITS = { items: 50, chars: 500 };
 export function boundedEmergedSubtasks(value, sink) {
     return boundedStringArray(value, EMERGED_LIMITS.items, EMERGED_LIMITS.chars, sink, "emerged_subtasks");
 }
-function nonNegativeInteger(value, sink, path = "") {
-    if (typeof value !== "number" || !Number.isFinite(value)) {
-        if (value !== undefined && value !== null) {
-            sink?.push(path, "invalid_value", "normalized", "expected a finite number; defaulted to 0");
-        }
-        return 0;
-    }
-    const normalized = Math.max(0, Math.trunc(value));
-    if (normalized !== value) {
-        sink?.push(path, "normalized", "normalized", `expected a non-negative integer; normalized to ${normalized}`);
-    }
-    return normalized;
-}
 /** v2.12: Parse retroactive claims — {round ≥ 1, claim non-empty}, capped at
  *  20 entries. Invalid entries are silently dropped (lenient parsing). */
 function parseRetroactiveClaims(raw, sink) {
@@ -157,61 +144,44 @@ export function parseExecutionReport(raw, sink, knownCriterionRefs) {
         return undefined;
     }
     for (const key of unknownExecutionReportEntryFields(raw)) {
-        sink?.push(`execution_report.${key}`, "unknown_field", "dropped", "not a declared execution_report field; it was dropped");
-    }
-    const testResults = raw.tests_reported && typeof raw.tests_reported === "object" &&
-        !Array.isArray(raw.tests_reported)
-        ? raw.tests_reported
-        : undefined;
-    let tests = null;
-    if (raw.tests_reported !== undefined && raw.tests_reported !== null) {
-        if (!testResults) {
-            sink?.push("execution_report.tests_reported", "invalid_entry", "dropped", "expected { passed, failed, skipped }; the value was dropped");
-        }
-        else if (typeof testResults.passed !== "number" ||
-            !Number.isFinite(testResults.passed)) {
-            sink?.push("execution_report.tests_reported", "invalid_value", "dropped", "`passed` must be a finite number; the whole object was dropped");
-        }
-        else {
-            for (const key of Object.keys(testResults)) {
-                if (key !== "passed" && key !== "failed" && key !== "skipped") {
-                    sink?.push(`execution_report.tests_reported.${key}`, "unknown_field", "dropped", "not a declared test-count field; it was dropped");
-                }
-            }
-            tests = {
-                passed: nonNegativeInteger(testResults.passed, sink, "execution_report.tests_reported.passed"),
-                failed: nonNegativeInteger(testResults.failed, sink, "execution_report.tests_reported.failed"),
-                skipped: nonNegativeInteger(testResults.skipped, sink, "execution_report.tests_reported.skipped"),
-            };
-        }
+        const path = `execution_report.${key}`;
+        sink?.push(path, "unknown_field", "dropped", retiredFieldDetail(path) ?? "not a declared execution_report field; it was dropped");
     }
     return makeExecutionReport({
         files_changed: boundedStringArray(raw.files_changed, 200, 500, sink, "execution_report.files_changed"),
-        tests_reported: tests,
-        criterion_claims: parseCriterionClaims(raw.criterion_claims, sink, knownCriterionRefs),
-        contract_item_claims: parseContractItemClaims(raw.contract_item_claims, sink),
+        claims: parseExecutionClaims(raw.claims, sink, knownCriterionRefs),
     });
 }
-/** v3.8: The criterion ids the agent claims met this round. */
+const CLAIM_ID_RE = /^(cr|rci)-[a-f0-9]{8}$/;
+function isCriterionClaimId(id) {
+    return id.startsWith("cr-");
+}
+/** v4.0.6: the claimed `cr-` criterion ids with the given outcome. */
+function claimedCriteria(report, outcome) {
+    return (report?.claims ?? [])
+        .filter((claim) => claim.outcome === outcome && isCriterionClaimId(claim.id))
+        .map((claim) => claim.id);
+}
+/** v4.0.6: The criterion ids the agent claims met this round. */
 export function claimedMetCriteria(report) {
-    return (report?.criterion_claims ?? [])
-        .filter((claim) => claim.outcome === "met")
-        .map((claim) => claim.criterion_id);
+    return claimedCriteria(report, "met");
 }
-/** v3.8: The criterion ids the agent declares still outstanding. */
+/** v4.0.6: The criterion ids the agent declares still outstanding. */
 export function claimedRemainingCriteria(report) {
-    return (report?.criterion_claims ?? [])
-        .filter((claim) => claim.outcome === "remaining")
-        .map((claim) => claim.criterion_id);
+    return claimedCriteria(report, "remaining");
 }
-/** v3.8: LENIENT parse of advisory criterion claims — unknown or malformed
- *  entries are dropped, never a rejection (the contract item layer is the
- *  strict one). */
-function parseCriterionClaims(raw, sink, knownCriterionRefs) {
+/** v4.0.6: LENIENT parse of the ONE claims channel.
+ *
+ *  `cr-` claims are advisory: unknown/malformed entries are dropped with a
+ *  diagnostic, never a rejection. `rci-` claims are STRICT at the submission
+ *  boundary (`validateContractShape` checks format, uniqueness and the ACTIVE
+ *  item set); this parser only normalizes what reaches the read model and
+ *  drops structurally malformed entries on library paths. */
+function parseExecutionClaims(raw, sink, knownCriterionRefs) {
     if (raw === undefined || raw === null)
         return [];
     if (!Array.isArray(raw)) {
-        sink?.push("execution_report.criterion_claims", "not_array", "dropped", "expected an array of claims; the value was dropped");
+        sink?.push("execution_report.claims", "not_array", "dropped", "expected an array of { id, outcome } claims; the value was dropped");
         return [];
     }
     const claims = [];
@@ -226,29 +196,30 @@ function parseCriterionClaims(raw, sink, knownCriterionRefs) {
             continue;
         }
         const entry = item;
-        if (typeof entry.criterion_id !== "string" ||
-            entry.criterion_id.trim().length === 0 ||
+        if (typeof entry.id !== "string" ||
             (entry.outcome !== "met" && entry.outcome !== "remaining")) {
             invalid++;
             continue;
         }
-        const trimmed = entry.criterion_id.trim();
-        if (trimmed !== entry.criterion_id) {
-            sink?.push(`execution_report.criterion_claims[${index}].criterion_id`, "normalized", "normalized", "leading/trailing whitespace was trimmed");
+        const trimmed = entry.id.trim();
+        if (trimmed !== entry.id) {
+            sink?.push(`execution_report.claims[${index}].id`, "normalized", "normalized", "leading/trailing whitespace was trimmed");
         }
-        if (trimmed.length > 500) {
-            sink?.push(`execution_report.criterion_claims[${index}].criterion_id`, "truncated", "truncated", "longer than 500 chars; truncated to the limit");
+        if (trimmed.length > 64) {
+            sink?.push(`execution_report.claims[${index}].id`, "truncated", "truncated", "longer than 64 chars; truncated to the limit");
         }
-        const criterionId = trimmed.slice(0, 500);
-        if (knownCriterionRefs !== undefined && knownCriterionRefs !== null &&
-            !knownCriterionRefs.some((criterion) => criterionRefMatches(criterionId, criterion))) {
+        const id = trimmed.slice(0, 64);
+        if (!CLAIM_ID_RE.test(id)) {
+            invalid++;
+            continue;
+        }
+        if (isCriterionClaimId(id) && knownCriterionRefs !== undefined &&
+            knownCriterionRefs !== null &&
+            !knownCriterionRefs.some((criterion) => criterionRefMatches(id, criterion))) {
             unknown++;
             continue;
         }
-        claims.push({
-            criterion_id: criterionId,
-            outcome: entry.outcome,
-        });
+        claims.push({ id, outcome: entry.outcome });
     }
     if (invalid > 0 || unknown > 0) {
         if (claims.length === 0) {
@@ -257,68 +228,21 @@ function parseCriterionClaims(raw, sink, knownCriterionRefs) {
                 parts.push(`${invalid} malformed`);
             if (unknown > 0)
                 parts.push(`${unknown} unknown criterion`);
-            sink?.push("execution_report.criterion_claims", DIAG_ALL_ENTRIES_DROPPED, "dropped", `all ${invalid + unknown} claims were dropped (${parts.join(", ")}; advisory)`);
+            sink?.push("execution_report.claims", DIAG_ALL_ENTRIES_DROPPED, "dropped", `all ${invalid + unknown} claims were dropped (${parts.join(", ")}; ` +
+                "malformed/unreferenced claims never reject a round)");
         }
         else {
             if (invalid > 0) {
-                sink?.push("execution_report.criterion_claims", "invalid_entry", "dropped", `${invalid} malformed claim${invalid === 1 ? "" : "s"} dropped (advisory)`);
+                sink?.push("execution_report.claims", "invalid_entry", "dropped", `${invalid} malformed claim${invalid === 1 ? "" : "s"} dropped`);
             }
             if (unknown > 0) {
-                sink?.push("execution_report.criterion_claims", "unknown_id", "dropped", `${unknown} claim${unknown === 1 ? "" : "s"} cited a criterion the ` +
+                sink?.push("execution_report.claims", "unknown_id", "dropped", `${unknown} cr- claim${unknown === 1 ? "" : "s"} cited a criterion the ` +
                     "prompt did not render; dropped (advisory)");
             }
         }
     }
     if (raw.length > 100) {
-        sink?.push("execution_report.criterion_claims", "too_many", "truncated", "only the first 100 claims are kept");
-    }
-    return claims;
-}
-/** v3.8: LENIENT parse of contract item claims. Referential validity is the
- *  strict pre-advance boundary in validateContractShape — this parser only
- *  normalizes what reaches the read model. */
-function parseContractItemClaims(raw, sink) {
-    if (raw === undefined || raw === null)
-        return [];
-    if (!Array.isArray(raw)) {
-        sink?.push("execution_report.contract_item_claims", "not_array", "dropped", "expected an array of claims; the value was dropped");
-        return [];
-    }
-    const claims = [];
-    let invalid = 0;
-    for (let index = 0; index < raw.length; index++) {
-        if (claims.length >= 20)
-            break;
-        const item = raw[index];
-        if (typeof item !== "object" || item === null || Array.isArray(item)) {
-            invalid++;
-            continue;
-        }
-        const entry = item;
-        if (typeof entry.item_id !== "string" ||
-            (entry.outcome !== "met" && entry.outcome !== "remaining")) {
-            invalid++;
-            continue;
-        }
-        const trimmed = entry.item_id.trim();
-        if (trimmed !== entry.item_id) {
-            sink?.push(`execution_report.contract_item_claims[${index}].item_id`, "normalized", "normalized", "leading/trailing whitespace was trimmed");
-        }
-        if (trimmed.length > 64) {
-            sink?.push(`execution_report.contract_item_claims[${index}].item_id`, "truncated", "truncated", "longer than 64 chars; truncated to the limit");
-        }
-        claims.push({
-            item_id: trimmed.slice(0, 64),
-            outcome: entry.outcome,
-        });
-    }
-    if (invalid > 0) {
-        sink?.push("execution_report.contract_item_claims", claims.length === 0 ? DIAG_ALL_ENTRIES_DROPPED : "invalid_entry", "dropped", claims.length === 0
-            ? `all ${invalid} claims were malformed; the value was dropped`
-            : `${invalid} malformed claim${invalid === 1 ? "" : "s"} dropped`);
-    }
-    if (raw.length > 20) {
-        sink?.push("execution_report.contract_item_claims", "too_many", "truncated", "only the first 20 claims are kept");
+        sink?.push("execution_report.claims", "too_many", "truncated", "only the first 100 claims are kept");
     }
     return claims;
 }
@@ -437,16 +361,24 @@ export function parseWorkerResults(raw, sink) {
 // closure, the walker, the verification gate and the coordinator share one
 // definition. Re-exported for the existing public surface.
 export { effectiveOutcome, effectiveSuccess, declaresBlocked, } from "./round-outcome.js";
+export const OBJECTIVE_REFINEMENT_MAX = 1000;
+export const BLOCKER_MAX = 500;
 export function validateCoreSelfEvaluation(raw) {
     const missing = [];
     const invalid = [];
-    const required = ["success", "output_summary", "constraint_violations", "should_continue"];
+    const required = ["outcome", "output_summary", "constraint_violations", "should_continue"];
     for (const field of required) {
         if (!(field in raw))
             missing.push(field);
     }
-    if ("success" in raw && typeof raw.success !== "boolean") {
-        invalid.push({ field: "success", expected: "boolean" });
+    const outcome = raw.outcome;
+    if ("outcome" in raw &&
+        (outcome !== "success" && outcome !== "partial" &&
+            outcome !== "failed" && outcome !== "blocked")) {
+        invalid.push({
+            field: "outcome",
+            expected: "success | partial | failed | blocked",
+        });
     }
     if ("output_summary" in raw && typeof raw.output_summary !== "string") {
         invalid.push({ field: "output_summary", expected: "string" });
@@ -458,6 +390,49 @@ export function validateCoreSelfEvaluation(raw) {
     }
     if ("should_continue" in raw && typeof raw.should_continue !== "boolean") {
         invalid.push({ field: "should_continue", expected: "boolean" });
+    }
+    // v4.0.6: strict outcome/blocker combinations. A non-blocked blocker is NOT
+    // rejected — it is dropped with a diagnostic by the parser.
+    if (outcome === "success" && raw.should_continue === true) {
+        invalid.push({
+            field: "outcome",
+            expected: "outcome=success requires should_continue=false",
+        });
+    }
+    if (outcome === "blocked") {
+        if (raw.should_continue === true) {
+            invalid.push({
+                field: "outcome",
+                expected: "outcome=blocked requires should_continue=false",
+            });
+        }
+        if (typeof raw.blocker !== "string" || raw.blocker.trim().length === 0) {
+            invalid.push({
+                field: "blocker",
+                expected: "a non-empty blocker string is required when outcome=blocked",
+            });
+        }
+        else if (raw.blocker.length > BLOCKER_MAX) {
+            invalid.push({
+                field: "blocker",
+                expected: `a string of at most ${BLOCKER_MAX} chars when outcome=blocked`,
+            });
+        }
+    }
+    if (raw.objective_refinement !== undefined) {
+        const refinement = raw.objective_refinement;
+        if (typeof refinement !== "string" || refinement.trim().length === 0) {
+            invalid.push({
+                field: "objective_refinement",
+                expected: "a non-empty string",
+            });
+        }
+        else if (refinement.length > OBJECTIVE_REFINEMENT_MAX) {
+            invalid.push({
+                field: "objective_refinement",
+                expected: `a string of at most ${OBJECTIVE_REFINEMENT_MAX} chars`,
+            });
+        }
     }
     return { missing, invalid };
 }
@@ -541,178 +516,50 @@ export function validateSubGoalUpdatesShape(raw) {
     return errors;
 }
 const CONTRACT_ID_RE = /^rc-[a-f0-9]{8}$/;
-export const CONTRACT_TRANSITION_REASON_MAX = 500;
-/** v3.9.9: LENIENT contract-transition parser. Historical/externally written
- *  data produces a diagnostic and is dropped; it never closes a contract and
- *  never throws. The strict submission boundary is the only commit check. */
-export function parseContractTransition(raw, sink) {
+export const CONTRACT_SUPERSEDE_REASON_MAX = 500;
+function declaresBlockedRaw(raw) {
+    return raw.outcome === "blocked";
+}
+/** v4.0.6: LENIENT parser for the `supersedes` modifier inside a committed
+ *  Round Contract proposal. Historical/externally written data produces a
+ *  diagnostic and is dropped; it never closes a contract and never throws.
+ *  The strict submission boundary is the only commit check. */
+export function parseContractSupersede(raw, sink, path = "round_contract.supersedes") {
     if (raw === undefined)
         return undefined;
     if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
-        sink?.push("contract_transition", "invalid_entry", "dropped", "expected a contract-transition object; the value was dropped");
+        sink?.push(path, "invalid_entry", "dropped", "expected a { contract_id, reason? } object; the value was dropped");
         return undefined;
     }
     const obj = raw;
     for (const key of Object.keys(obj)) {
-        if (!["kind", "contract_id", "reason"].includes(key)) {
-            sink?.push(`contract_transition.${key}`, "unknown_field", "dropped", "not a declared contract-transition field; it was dropped");
+        if (key !== "contract_id" && key !== "reason") {
+            sink?.push(`${path}.${key}`, "unknown_field", "dropped", "not a declared supersedes field; it was dropped");
         }
-    }
-    if (obj.kind !== "supersede") {
-        // An exact-path diagnostic: the whole transition was dropped, so field
-        // accounting can explain the attempted-but-not-retained path.
-        sink?.push("contract_transition", "invalid_enum", "dropped", "only kind \"supersede\" is supported; the transition was dropped");
-        return undefined;
     }
     if (typeof obj.contract_id !== "string" ||
         !CONTRACT_ID_RE.test(obj.contract_id.trim())) {
-        sink?.push("contract_transition", "invalid_id", "dropped", "contract_id must be an rc-XXXXXXXX id; the transition was dropped");
+        sink?.push(path, "invalid_id", "dropped", "contract_id must be an rc-XXXXXXXX id; the redirect was dropped");
         return undefined;
     }
     const contractId = obj.contract_id.trim();
     let reason;
     if (obj.reason !== undefined) {
         if (typeof obj.reason !== "string") {
-            sink?.push("contract_transition.reason", "invalid_value", "dropped", "expected a string; the reason was dropped");
+            sink?.push(`${path}.reason`, "invalid_value", "dropped", "expected a string; the reason was dropped");
         }
-        else if (obj.reason.length > CONTRACT_TRANSITION_REASON_MAX) {
-            sink?.push("contract_transition.reason", "truncated", "truncated", `longer than ${CONTRACT_TRANSITION_REASON_MAX} chars; truncated to the limit`);
-            reason = obj.reason.slice(0, CONTRACT_TRANSITION_REASON_MAX);
+        else if (obj.reason.length > CONTRACT_SUPERSEDE_REASON_MAX) {
+            sink?.push(`${path}.reason`, "truncated", "truncated", `longer than ${CONTRACT_SUPERSEDE_REASON_MAX} chars; truncated to the limit`);
+            reason = obj.reason.slice(0, CONTRACT_SUPERSEDE_REASON_MAX);
         }
         else {
             reason = obj.reason;
         }
     }
     return {
-        kind: "supersede",
         contract_id: contractId,
         ...(reason !== undefined ? { reason } : {}),
     };
-}
-function declaresBlockedRaw(raw) {
-    return raw.outcome === "blocked" ||
-        raw.agent_stop_reason === "blocked" ||
-        raw.agent_stop_reason === "needs_human_input";
-}
-/** v3.9.9: strict transition boundary. Every failure is `contract_invalid` and
- *  the same submissionHandle may retry with a corrected payload. */
-export function validateContractTransition(raw, context) {
-    const transition = raw.contract_transition;
-    if (transition === undefined)
-        return [];
-    const errors = [];
-    if (transition === null || typeof transition !== "object" ||
-        Array.isArray(transition)) {
-        errors.push({
-            field: "contract_transition",
-            reason: "not_object",
-            detail: "contract_transition must be an object",
-        });
-        return errors;
-    }
-    const obj = transition;
-    for (const key of Object.keys(obj)) {
-        if (!["kind", "contract_id", "reason"].includes(key)) {
-            errors.push({
-                field: "contract_transition",
-                reason: "unknown_field",
-                detail: `contract_transition has unknown field "${key}"`,
-            });
-        }
-    }
-    if (obj.kind !== "supersede") {
-        errors.push({
-            field: "contract_transition",
-            reason: "invalid_kind",
-            detail: "contract_transition.kind must be \"supersede\"",
-        });
-    }
-    const contractId = typeof obj.contract_id === "string"
-        ? obj.contract_id.trim()
-        : "";
-    if (!CONTRACT_ID_RE.test(contractId)) {
-        errors.push({
-            field: "contract_transition",
-            reason: "invalid_contract_id",
-            detail: "contract_transition.contract_id must be an rc-XXXXXXXX id",
-        });
-    }
-    if (obj.reason !== undefined &&
-        (typeof obj.reason !== "string" ||
-            obj.reason.length > CONTRACT_TRANSITION_REASON_MAX)) {
-        errors.push({
-            field: "contract_transition",
-            reason: "invalid_reason",
-            detail: `contract_transition.reason must be a string of at most ` +
-                `${CONTRACT_TRANSITION_REASON_MAX} chars`,
-        });
-    }
-    // A transition is always a redirect to a successor, never a bare note.
-    const successor = raw.round_contract;
-    if (successor === undefined || successor === null ||
-        typeof successor !== "object" || Array.isArray(successor)) {
-        errors.push({
-            field: "contract_transition",
-            reason: "transition_without_successor",
-            detail: "contract_transition must be submitted together with the successor round_contract",
-        });
-    }
-    if (declaresBlockedRaw(raw)) {
-        errors.push({
-            field: "contract_transition",
-            reason: "transition_conflicts_with_blocked",
-            detail: "a contract transition cannot be combined with a blocked outcome/agent_stop_reason",
-        });
-    }
-    if (raw.should_continue === false) {
-        errors.push({
-            field: "contract_transition",
-            reason: "transition_on_stop",
-            detail: "a contract transition activates a successor next round; it cannot be submitted with should_continue=false",
-        });
-    }
-    if (!context.observed)
-        return errors;
-    if (context.activeContractId === null) {
-        errors.push({
-            field: "contract_transition",
-            reason: "no_active_contract",
-            detail: "there is no active contract to supersede",
-        });
-    }
-    else if (contractId !== context.activeContractId) {
-        errors.push({
-            field: "contract_transition",
-            reason: "transition_target_mismatch",
-            detail: `contract_transition.contract_id must equal the active contract ` +
-                `(${context.activeContractId})`,
-        });
-    }
-    // "Substantive change" means the ACCEPTANCE CONTENT changed. A new
-    // work_item/scope label alone is not a new slice.
-    if (context.activeItemIdentities && successor &&
-        typeof successor === "object" && !Array.isArray(successor)) {
-        const rawItems = successor.items;
-        if (Array.isArray(rawItems)) {
-            const identities = new Set();
-            for (const item of rawItems) {
-                const identity = rawContractItemIdentity(item);
-                if (identity !== null)
-                    identities.add(identity);
-            }
-            if (identities.size > 0 &&
-                identities.size === context.activeItemIdentities.size &&
-                [...identities].every((identity) => context.activeItemIdentities.has(identity))) {
-                errors.push({
-                    field: "contract_transition",
-                    reason: "transition_without_change",
-                    detail: "the successor's acceptance items are identical to the active " +
-                        "contract's; changing only work_item/scope is not a new slice",
-                });
-            }
-        }
-    }
-    return errors;
 }
 function validateContractItem(item, index, context, errors) {
     if (typeof item !== "object" || item === null || Array.isArray(item)) {
@@ -838,6 +685,114 @@ function rawContractItemIdentity(item) {
         verify_with: strings(entry.verify_with),
     });
 }
+/** v4.0.6: strict `round_contract.supersedes` boundary. Every failure is
+ *  `contract_invalid`; the same submissionHandle may retry with a corrected
+ *  payload. The rules migrated from the former standalone
+ *  `contract_transition` field:
+ *  - the target must exist and equal the ACTIVE contract id;
+ *  - the successor (this same proposal) must carry different acceptance items;
+ *  - a redirect cannot be combined with a blocked outcome or a stop.
+ *  `scope`/`work_item` differences alone are not a new slice. */
+function validateContractSupersede(raw, proposal, context, errors) {
+    const value = proposal.supersedes;
+    if (value === undefined)
+        return;
+    const field = "round_contract.supersedes";
+    if (value === null || typeof value !== "object" || Array.isArray(value)) {
+        errors.push({
+            field,
+            reason: "not_object",
+            detail: "round_contract.supersedes must be a { contract_id, reason? } object",
+        });
+        return;
+    }
+    const obj = value;
+    for (const key of Object.keys(obj)) {
+        if (key !== "contract_id" && key !== "reason") {
+            errors.push({
+                field,
+                reason: "unknown_field",
+                detail: `round_contract.supersedes has unknown field "${key}"`,
+            });
+        }
+    }
+    const contractId = typeof obj.contract_id === "string"
+        ? obj.contract_id.trim()
+        : "";
+    if (!CONTRACT_ID_RE.test(contractId)) {
+        errors.push({
+            field,
+            reason: "invalid_contract_id",
+            detail: "round_contract.supersedes.contract_id must be an rc-XXXXXXXX id",
+        });
+    }
+    if (obj.reason !== undefined &&
+        (typeof obj.reason !== "string" ||
+            obj.reason.length > CONTRACT_SUPERSEDE_REASON_MAX)) {
+        errors.push({
+            field,
+            reason: "invalid_reason",
+            detail: `round_contract.supersedes.reason must be a string of at most ` +
+                `${CONTRACT_SUPERSEDE_REASON_MAX} chars`,
+        });
+    }
+    if (declaresBlockedRaw(raw)) {
+        errors.push({
+            field,
+            reason: "supersede_conflicts_with_blocked",
+            detail: "a contract redirect cannot be combined with a blocked outcome",
+        });
+    }
+    if (raw.should_continue === false) {
+        errors.push({
+            field,
+            reason: "supersede_on_stop",
+            detail: "a contract redirect activates a successor next round; it cannot be submitted with should_continue=false",
+        });
+    }
+    if (context.observed === false)
+        return;
+    if (context.activeContractId === undefined)
+        return;
+    if (context.activeContractId === null) {
+        errors.push({
+            field,
+            reason: "no_active_contract",
+            detail: "there is no active contract to supersede",
+        });
+        return;
+    }
+    if (contractId !== context.activeContractId) {
+        errors.push({
+            field,
+            reason: "supersede_target_mismatch",
+            detail: `round_contract.supersedes.contract_id must equal the active contract ` +
+                `(${context.activeContractId})`,
+        });
+    }
+    // "Substantive change" means the ACCEPTANCE CONTENT changed. A new
+    // work_item/scope label alone is not a new slice.
+    const activeIdentities = context.activeItemIdentities;
+    const rawItems = proposal.items;
+    if (activeIdentities && Array.isArray(rawItems)) {
+        const identities = new Set();
+        for (const item of rawItems) {
+            const identity = rawContractItemIdentity(item);
+            if (identity !== null)
+                identities.add(identity);
+        }
+        if (identities.size > 0 &&
+            identities.size === activeIdentities.size &&
+            [...identities].every((identity) => activeIdentities.has(identity))) {
+            errors.push({
+                field,
+                reason: "supersede_without_change",
+                detail: "the successor's acceptance items are identical to the active " +
+                    "contract's; changing only work_item/scope is not a new slice",
+            });
+        }
+    }
+}
 /** v3.8: Strict STRUCTURAL boundary for the Round Contract declaration and
  *  the contract item claims — the same pre-advance contract as
  *  subgoal_updates: an error here is a payload defect, never a work-quality
@@ -869,7 +824,7 @@ export function validateContractShape(raw, context) {
         else {
             const obj = contract;
             for (const key of Object.keys(obj)) {
-                if (!["work_item", "scope", "items"].includes(key)) {
+                if (!["work_item", "scope", "supersedes", "items"].includes(key)) {
                     errors.push({
                         field: "round_contract",
                         reason: "unknown_field",
@@ -946,17 +901,21 @@ export function validateContractShape(raw, context) {
                     seenItems.set(identity, index);
                 });
             }
+            validateContractSupersede(raw, obj, context, errors);
         }
     }
+    // v4.0.6: `execution_report.claims` is the ONE claims channel. Only `rci-`
+    // entries are STRICT here (format, uniqueness, ACTIVE item membership);
+    // `cr-` entries stay advisory and are normalized by the lenient parser.
     const report = raw.execution_report;
     if (typeof report === "object" && report !== null && !Array.isArray(report)) {
-        const claims = report.contract_item_claims;
+        const claims = report.claims;
         if (claims !== undefined) {
             if (!Array.isArray(claims)) {
                 errors.push({
-                    field: "execution_report.contract_item_claims",
+                    field: "execution_report.claims",
                     reason: "not_array",
-                    detail: "contract_item_claims must be an array of { item_id, outcome } entries",
+                    detail: "execution_report.claims must be an array of { id, outcome } entries",
                 });
             }
             else {
@@ -964,41 +923,44 @@ export function validateContractShape(raw, context) {
                 claims.forEach((claim, index) => {
                     if (typeof claim !== "object" || claim === null || Array.isArray(claim)) {
                         errors.push({
-                            field: "execution_report.contract_item_claims",
+                            field: "execution_report.claims",
                             reason: "invalid_entry",
                             detail: `entry ${index} is not an object`,
                         });
                         return;
                     }
                     const entry = claim;
-                    const id = typeof entry.item_id === "string" ? entry.item_id.trim() : "";
-                    if (!/^rci-[a-f0-9]{8}$/.test(id)) {
-                        errors.push({
-                            field: "execution_report.contract_item_claims",
-                            reason: "invalid_item_id",
-                            detail: `entry ${index} must reference an rci-XXXXXXXX contract item id`,
-                        });
-                    }
-                    else {
-                        if (seen.has(id)) {
+                    const rawId = typeof entry.id === "string" ? entry.id.trim() : "";
+                    const strictItem = rawId.startsWith("rci-");
+                    if (strictItem) {
+                        if (!/^rci-[a-f0-9]{8}$/.test(rawId)) {
                             errors.push({
-                                field: "execution_report.contract_item_claims",
-                                reason: "duplicate_item_id",
-                                detail: `entry ${index} repeats item id ${id}`,
+                                field: "execution_report.claims",
+                                reason: "invalid_item_id",
+                                detail: `entry ${index} must reference an rci-XXXXXXXX contract item id`,
                             });
                         }
-                        seen.add(id);
-                        if (context.activeItemIds && !context.activeItemIds.has(id)) {
-                            errors.push({
-                                field: "execution_report.contract_item_claims",
-                                reason: "unknown_item_id",
-                                detail: `entry ${index} references ${id}, which is not an item of the ACTIVE contract`,
-                            });
+                        else {
+                            if (seen.has(rawId)) {
+                                errors.push({
+                                    field: "execution_report.claims",
+                                    reason: "duplicate_item_id",
+                                    detail: `entry ${index} repeats item id ${rawId}`,
+                                });
+                            }
+                            seen.add(rawId);
+                            if (context.activeItemIds && !context.activeItemIds.has(rawId)) {
+                                errors.push({
+                                    field: "execution_report.claims",
+                                    reason: "unknown_item_id",
+                                    detail: `entry ${index} references ${rawId}, which is not an item of the ACTIVE contract`,
+                                });
+                            }
                         }
                     }
                     if (entry.outcome !== "met" && entry.outcome !== "remaining") {
                         errors.push({
-                            field: "execution_report.contract_item_claims",
+                            field: "execution_report.claims",
                             reason: "invalid_outcome",
                             detail: `entry ${index} outcome must be "met" or "remaining"`,
                         });
@@ -1029,9 +991,6 @@ export function buildSelfEvaluation(raw, sink, facts) {
         return false;
     });
     const workerResults = parseWorkerResults(raw.worker_results, sink);
-    if (raw.success !== undefined && typeof raw.success !== "boolean") {
-        sink?.push("success", "invalid_value", "dropped", "expected a boolean; normalized to false (core validation rejects it)");
-    }
     if (raw.output_summary !== undefined && typeof raw.output_summary !== "string") {
         sink?.push("output_summary", "invalid_value", "dropped", "expected a string; normalized to the empty string (core validation rejects it)");
     }
@@ -1054,29 +1013,38 @@ export function buildSelfEvaluation(raw, sink, facts) {
     if (raw.should_continue !== undefined && typeof raw.should_continue !== "boolean") {
         sink?.push("should_continue", "invalid_value", "dropped", "expected a boolean; normalized to true (core validation rejects it)");
     }
-    if (raw.agent_stop_reason !== undefined &&
-        raw.agent_stop_reason !== "gave_up" && raw.agent_stop_reason !== "blocked" &&
-        raw.agent_stop_reason !== "needs_human_input") {
-        sink?.push("agent_stop_reason", "invalid_enum", "dropped", "expected gave_up | blocked | needs_human_input; the value was dropped");
-    }
     if (raw.outcome !== undefined &&
         raw.outcome !== "success" && raw.outcome !== "partial" &&
         raw.outcome !== "failed" && raw.outcome !== "blocked") {
-        sink?.push("outcome", "invalid_enum", "dropped", "expected success | partial | failed | blocked; the value was dropped");
+        sink?.push("outcome", "invalid_enum", "dropped", "expected success | partial | failed | blocked; the value was dropped (core validation rejects it)");
+    }
+    if (raw.objective_refinement !== undefined) {
+        if (typeof raw.objective_refinement !== "string") {
+            sink?.push("objective_refinement", "invalid_value", "dropped", "expected a string; the value was dropped (core validation rejects it)");
+        }
+        else if (raw.objective_refinement.trim().length === 0) {
+            sink?.push("objective_refinement", DIAG_EMPTY_VALUE, "dropped", "empty objective_refinement was dropped (core validation rejects it)");
+        }
+        else if (raw.objective_refinement.length > OBJECTIVE_REFINEMENT_MAX) {
+            sink?.push("objective_refinement", "truncated", "truncated", `longer than ${OBJECTIVE_REFINEMENT_MAX} chars; truncated to the limit (core validation rejects it)`);
+        }
     }
     if (raw.subtask_boundary !== undefined &&
         typeof raw.subtask_boundary !== "boolean") {
         sink?.push("subtask_boundary", "invalid_value", "dropped", "expected a boolean; normalized to false");
     }
     if (raw.blocker !== undefined) {
-        if (typeof raw.blocker !== "string") {
-            sink?.push("blocker", "invalid_value", "dropped", "expected a string; the value was dropped");
+        if (raw.outcome !== "blocked") {
+            sink?.push("blocker", "not_applicable", "dropped", `blocker is meaningful only when outcome=blocked (outcome=${typeof raw.outcome === "string" ? raw.outcome : "missing"}); the value was dropped`);
+        }
+        else if (typeof raw.blocker !== "string") {
+            sink?.push("blocker", "invalid_value", "dropped", "expected a string; the value was dropped (core validation rejects it)");
         }
         else if (raw.blocker.trim().length === 0) {
-            sink?.push("blocker", DIAG_EMPTY_VALUE, "dropped", "empty blocker was dropped");
+            sink?.push("blocker", DIAG_EMPTY_VALUE, "dropped", "empty blocker was dropped (core validation rejects it)");
         }
-        else if (raw.blocker.length > 500) {
-            sink?.push("blocker", "truncated", "truncated", "longer than 500 chars; truncated to the limit");
+        else if (raw.blocker.length > BLOCKER_MAX) {
+            sink?.push("blocker", "truncated", "truncated", `longer than ${BLOCKER_MAX} chars; truncated to the limit (core validation rejects it)`);
         }
     }
     const noChangeReason = boundedString(raw.no_change_reason, 200, sink, "no_change_reason");
@@ -1084,7 +1052,10 @@ export function buildSelfEvaluation(raw, sink, facts) {
         sink?.push("no_change_reason", DIAG_EMPTY_VALUE, "dropped", "empty reason was dropped");
     }
     return makeSelfEvaluation({
-        success: typeof raw.success === "boolean" ? raw.success : false,
+        outcome: raw.outcome === "success" || raw.outcome === "partial" ||
+            raw.outcome === "failed" || raw.outcome === "blocked"
+            ? raw.outcome
+            : "failed",
         output_summary: typeof raw.output_summary === "string" ? raw.output_summary : "",
         constraint_violations: constraintViolations,
         should_continue: typeof raw.should_continue === "boolean" ? raw.should_continue : true,
@@ -1099,22 +1070,18 @@ export function buildSelfEvaluation(raw, sink, facts) {
         subtask_boundary: typeof raw.subtask_boundary === "boolean" ? raw.subtask_boundary : false,
         subtask_boundary_label: boundedString(raw.subtask_boundary_label, 200, sink, "subtask_boundary_label") ?? "",
         subgoal_updates: parseSubGoalUpdates(raw.subgoal_updates, sink),
-        agent_stop_reason: raw.agent_stop_reason === "gave_up" || raw.agent_stop_reason === "blocked" ||
-            raw.agent_stop_reason === "needs_human_input"
-            ? raw.agent_stop_reason
+        objective_refinement: typeof raw.objective_refinement === "string" &&
+            raw.objective_refinement.trim().length > 0
+            ? raw.objective_refinement.trim().slice(0, OBJECTIVE_REFINEMENT_MAX)
             : undefined,
-        outcome: raw.outcome === "success" || raw.outcome === "partial" ||
-            raw.outcome === "failed" || raw.outcome === "blocked"
-            ? raw.outcome
-            : undefined,
-        blocker: typeof raw.blocker === "string" && raw.blocker.trim().length > 0
-            ? raw.blocker.slice(0, 500)
+        blocker: raw.outcome === "blocked" &&
+            typeof raw.blocker === "string" && raw.blocker.trim().length > 0
+            ? raw.blocker.slice(0, BLOCKER_MAX)
             : undefined,
         gate_ids: boundedStringArray(raw.gate_ids, 20, 64, sink, "gate_ids"),
         retroactiveClaims: parseRetroactiveClaims(raw.retroactiveClaims, sink),
         no_change_reason: noChangeReason || undefined,
         round_contract: parseRoundContract(raw.round_contract, sink),
-        contract_transition: parseContractTransition(raw.contract_transition, sink),
     });
 }
 /** Normalize a raw submission and report every lossy decision. Unknown and
@@ -1161,7 +1128,7 @@ export function parseRoundContract(raw, sink) {
     }
     const obj = raw;
     for (const key of Object.keys(obj)) {
-        if (!["work_item", "scope", "items"].includes(key)) {
+        if (!["work_item", "scope", "supersedes", "items"].includes(key)) {
             sink?.push(`round_contract.${key}`, "unknown_field", "dropped", "not a declared contract field; it was dropped");
         }
     }
@@ -1247,11 +1214,13 @@ export function parseRoundContract(raw, sink) {
         obj.work_item.trim().length > CONTRACT_LIMITS.workItem) {
         sink?.push("round_contract.work_item", "truncated", "truncated", `longer than ${CONTRACT_LIMITS.workItem} chars; truncated to the limit`);
     }
+    const supersedes = parseContractSupersede(obj.supersedes, sink);
     return {
         work_item: typeof obj.work_item === "string" && obj.work_item.trim().length > 0
             ? obj.work_item.trim().slice(0, CONTRACT_LIMITS.workItem)
             : undefined,
         scope: capStrings(obj.scope, 500, CONTRACT_LIMITS.scope, "round_contract.scope"),
+        ...(supersedes !== undefined ? { supersedes } : {}),
         items,
     };
 }

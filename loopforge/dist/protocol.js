@@ -34,7 +34,7 @@ export function makeGateDecision(overrides = {}) {
 export const FILES_RECONCILIATION_SCOPE = "tracked_and_non_ignored_untracked";
 export function makeSelfEvaluation(overrides = {}) {
     return {
-        success: false,
+        outcome: "failed",
         output_summary: "",
         constraint_violations: [],
         should_continue: true,
@@ -49,8 +49,7 @@ export function makeSelfEvaluation(overrides = {}) {
         worker_results: [],
         subtask_boundary: false,
         subtask_boundary_label: "",
-        agent_stop_reason: undefined,
-        outcome: undefined,
+        objective_refinement: undefined,
         blocker: undefined,
         retroactiveClaims: [],
         no_change_reason: undefined,
@@ -114,7 +113,7 @@ export function makeLoopRoundResult(overrides = {}) {
         worker_results: [],
         subtask_boundary: false,
         subtask_boundary_label: "",
-        agentOutcome: undefined,
+        agentOutcome: "failed",
         blocker: undefined,
         retroactiveClaims: [],
         no_change_reason: undefined,
@@ -125,7 +124,6 @@ export function makeLoopCompileRequest(overrides = {}) {
     return {
         loop_id: "",
         round: 1,
-        goal_id: "",
         task: "",
         loop_objective: null,
         plan_source: null,
@@ -177,10 +175,16 @@ export function isPromptContextReason(value) {
  *  `invocation_recovery` reason. No required field was removed or renamed, so
  *  every 4.0.4 artifact still decodes; the shared decoder whitelists
  *  (`PROMPT_CONTEXT_MODES` / `PROMPT_CONTEXT_REASONS`) are the only legality
- *  boundary. Older versions are a HARD break — a round whose artifact does
- *  not parse is not committed history, and `legacyTransactionRounds` reports
- *  the loss rather than letting it vanish. */
-export const PROMPT_ARTIFACT_SCHEMA_VERSION = 11;
+ *  boundary.
+ *
+ *  v4.0.6: schema 12 is a BREAKING shape break — the evaluation block renders
+ *  `outcome` plus one `execution_report.claims` channel and the contract
+ *  coverage requirement, and the old `success` / `agent_stop_reason` /
+ *  `contract_transition` / `tests_reported` paths are gone. Older artifacts
+ *  are a HARD break — a round whose artifact does not parse is not committed
+ *  history, and `legacyTransactionRounds` reports the loss rather than letting
+ *  it vanish. There is no migration. */
+export const PROMPT_ARTIFACT_SCHEMA_VERSION = 12;
 export function makeLoopCompileResponse(overrides = {}) {
     return {
         status: AgentStatus.OK,
@@ -232,9 +236,7 @@ export function makeVerificationResult(overrides = {}) {
 export function makeExecutionReport(overrides = {}) {
     return {
         files_changed: [],
-        tests_reported: null,
-        criterion_claims: [],
-        contract_item_claims: [],
+        claims: [],
         ...overrides,
     };
 }

@@ -50,7 +50,7 @@ export interface FieldGuide {
 /** v4.0.3: THE four structural evaluation fields. The MCP input schema, the
  *  prompt template and field accounting read this one set. */
 export declare const CORE_SELF_EVALUATION_FIELDS: ReadonlySet<string>;
-export declare const FIELD_ORDER: readonly ["success", "output_summary", "constraint_violations", "should_continue", "execution_report.files_changed", "execution_report.tests_reported", "execution_report.contract_item_claims", "execution_report.criterion_claims", "subgoal_updates", "emerged_subtasks", "discovered_constraints", "wrong_assumptions", "open_questions", "resolved_open_question_ids", "retracted_constraints", "round_contract", "contract_transition", "worker_results", "subtask_boundary", "subtask_boundary_label", "retroactiveClaims", "gate_ids", "outcome", "blocker", "agent_stop_reason", "no_change_reason"];
+export declare const FIELD_ORDER: readonly ["outcome", "output_summary", "constraint_violations", "should_continue", "execution_report.files_changed", "execution_report.claims", "objective_refinement", "subgoal_updates", "emerged_subtasks", "discovered_constraints", "wrong_assumptions", "open_questions", "resolved_open_question_ids", "retracted_constraints", "round_contract", "worker_results", "subtask_boundary", "subtask_boundary_label", "retroactiveClaims", "gate_ids", "blocker", "no_change_reason"];
 export type FieldPath = (typeof FIELD_ORDER)[number];
 /** v4.0.3: array-valued evaluation paths, derived from the SAME field
  *  metadata the prompt, MCP schema and receipts read. Field accounting uses
@@ -90,8 +90,8 @@ export declare function isFieldApplicable(path: string, facts: GuidanceFacts): b
 /** Compact-checklist membership: the explicit `compact` marker plus semantic
  *  applicability. The level is deliberately absent — L0/L1/L2 offer the same
  *  evaluation fields; only state density changes. Dedicated renderer fields
- *  (`round_contract`, `subgoal_updates`, `contract_item_claims`) are never
- *  compact members, so they cannot duplicate their own blocks. */
+ *  (`round_contract`, `subgoal_updates`) are never compact members, so they
+ *  cannot duplicate their own blocks. */
 export declare function isFieldPrompted(path: string, facts: GuidanceFacts): boolean;
 /** Deterministic compact-checklist order, shared by the renderer and tests. */
 export declare function promptedFieldPaths(facts: GuidanceFacts): string[];

@@ -41,7 +41,7 @@ const testCommandProviderPolicy = () => testCommandProvider();
 /** Build a minimal SelfEvaluation for testing. */
 function se(overrides: Partial<SelfEvaluation> = {}): SelfEvaluation {
   return makeSelfEvaluation({
-    success: true,
+    outcome: "partial",
     output_summary: "Task completed.",
     constraint_violations: [],
     should_continue: true,
@@ -138,10 +138,10 @@ function vaultRound(
 describe("enforcement-gate — happy path", () => {
   it("accepts a round with trusted verdict and clean self-eval", () => {
     const curr = se({
-      success: false,
+      outcome: "failed",
       execution_report: makeExecutionReport({
         files_changed: ["src/foo.ts"],
-        tests_reported: { passed: 3, failed: 1, skipped: 0 },
+
       }),
     });
     const result = enforceRound(curr, trusted(), 2, [], 0);
@@ -151,10 +151,10 @@ describe("enforcement-gate — happy path", () => {
 
   it("accepts a round with suspect verdict (warn only, not error)", () => {
     const curr = se({
-      success: false,
+      outcome: "failed",
       execution_report: makeExecutionReport({
         files_changed: ["src/bar.ts"],
-        tests_reported: { passed: 5, failed: 0, skipped: 0 },
+
       }),
     });
     const suspect: VerificationResult = makeVerificationResult({
@@ -173,7 +173,7 @@ describe("enforcement-gate — happy path", () => {
   });
 
   it("accepts round 1 with no prior vault data", () => {
-    const curr = se({ success: false });
+    const curr = se({ outcome: "failed" });
     const result = enforceRound(curr, trusted(), 1, [], 0);
     assert.equal(result.action, "accept");
   });
@@ -186,10 +186,10 @@ describe("enforcement-gate — happy path", () => {
 describe("enforcement-gate — R1: fake success", () => {
   it("rejects when agent claims success but criteria remain unmet", () => {
     const curr = se({
-      success: true,
+      outcome: "success",
       execution_report: makeExecutionReport({
         files_changed: ["src/foo.ts"],
-        criterion_claims: criterionClaims(["criteria-1"], ["criteria-2", "criteria-3"]),
+        claims: criterionClaims(["criteria-1"], ["criteria-2", "criteria-3"]),
       }),
     });
     const result = enforceRound(
@@ -210,7 +210,7 @@ describe("enforcement-gate — R1: fake success", () => {
 describe("enforcement-gate — R2: recurring violation", () => {
   it("rejects when same violation appears in 3 consecutive rounds", () => {
     const curr = se({
-      success: false,
+      outcome: "failed",
       constraint_violations: ["missing docs"],
     });
     const result = enforceRound(
@@ -248,10 +248,10 @@ describe("enforcement-gate — success evidence row (R8 removed in v3.9.1)", () 
 
   it("accepts when success=true with files_changed (not empty)", () => {
     const curr = se({
-      success: true,
+      outcome: "success",
       execution_report: makeExecutionReport({
         files_changed: ["src/fixed.ts"],
-        tests_reported: { passed: 10, failed: 0, skipped: 0 },
+
       }),
     });
     const result = enforceRound(curr, trusted(), 2, [], 0);
@@ -260,10 +260,10 @@ describe("enforcement-gate — success evidence row (R8 removed in v3.9.1)", () 
 
   it("does not reject on a warn-severity success-evidence flag", () => {
     const curr = se({
-      success: true,
+      outcome: "success",
       execution_report: makeExecutionReport({
         files_changed: [],
-        tests_reported: null,
+
       }),
     });
     const result = enforceRound(
@@ -276,7 +276,7 @@ describe("enforcement-gate — success evidence row (R8 removed in v3.9.1)", () 
   });
 
   it("does not act on a legacy error-severity flag (no producer, no row)", () => {
-    const curr = se({ success: true });
+    const curr = se({ outcome: "success" });
     const result = enforceRound(
       curr,
       makeVerificationResult({ verdict: "contradicted", flags: [evidenceFlag("error")] }),
@@ -294,7 +294,7 @@ describe("enforcement-gate — success evidence row (R8 removed in v3.9.1)", () 
 describe("enforcement-gate — progress stall evaluator (v3.7: R4/R5 merged)", () => {
   it("rejects when Git shows no motion for 3 rounds", () => {
     const curr = se({
-      success: false,
+      outcome: "failed",
       execution_report: makeExecutionReport({
         files_changed: ["src/foo.ts"],
       }),
@@ -311,7 +311,7 @@ describe("enforcement-gate — progress stall evaluator (v3.7: R4/R5 merged)", (
 
   it("accepts when Git observes file changes in the window", () => {
     const curr = se({
-      success: false,
+      outcome: "failed",
       execution_report: makeExecutionReport({
         files_changed: ["src/foo.ts"],
       }),
@@ -327,7 +327,7 @@ describe("enforcement-gate — progress stall evaluator (v3.7: R4/R5 merged)", (
 
   it("backtracks on second consecutive stall rejection instead of terminating", () => {
     const curr = se({
-      success: false,
+      outcome: "failed",
       execution_report: makeExecutionReport({
         files_changed: ["src/foo.ts"],
       }),
@@ -349,7 +349,7 @@ describe("enforcement-gate — progress stall evaluator (v3.7: R4/R5 merged)", (
 
   it("terminates on third consecutive stall rejection after escalation", () => {
     const curr = se({
-      success: false,
+      outcome: "failed",
       execution_report: makeExecutionReport({
         files_changed: ["src/foo.ts"],
       }),
@@ -367,7 +367,7 @@ describe("enforcement-gate — progress stall evaluator (v3.7: R4/R5 merged)", (
 
   it("does not fire with less than 3 rounds of vault data", () => {
     const curr = se({
-      success: false,
+      outcome: "failed",
       execution_report: makeExecutionReport({
       }),
     });
@@ -383,7 +383,7 @@ describe("enforcement-gate — progress stall evaluator (v3.7: R4/R5 merged)", (
 
 describe("enforcement-gate — R6: max rejections", () => {
   it("escalates after 2 consecutive rejections instead of terminating", () => {
-    const curr = se({ success: false });
+    const curr = se({ outcome: "failed" });
     // v2.7: consecutiveRejections=2 now escalates (reject + guidance) instead
     // of terminating immediately.
     const result = enforceRound(curr, trusted(), 3, [], 2);
@@ -393,7 +393,7 @@ describe("enforcement-gate — R6: max rejections", () => {
   });
 
   it("terminates after 3 consecutive rejections", () => {
-    const curr = se({ success: false });
+    const curr = se({ outcome: "failed" });
     // v2.7: consecutiveRejections=3 → terminate (escalation already given)
     const result = enforceRound(curr, trusted(), 3, [], 3);
     assert.equal(result.action, "terminate");
@@ -401,7 +401,7 @@ describe("enforcement-gate — R6: max rejections", () => {
   });
 
   it("does not escalate with only 1 rejection", () => {
-    const curr = se({ success: false });
+    const curr = se({ outcome: "failed" });
     const result = enforceRound(curr, trusted(), 3, [], 1);
     assert.equal(result.action, "accept");
   });
@@ -414,11 +414,10 @@ describe("enforcement-gate — R6: max rejections", () => {
 describe("enforcement-gate — rule priority", () => {
   it("R1 (fake success) fires before R3 (empty success)", () => {
     const curr = se({
-      success: true,
+      outcome: "success",
       execution_report: makeExecutionReport({
-        files_changed: [],       // triggers R3
-        tests_reported: null,       // triggers R3
-        criterion_claims: criterionClaims(["x"], ["y", "z"]),  // triggers R1
+        files_changed: [],
+        claims: criterionClaims(["x"], ["y", "z"]),  // triggers R1
       }),
     });
     const result = enforceRound(
@@ -619,7 +618,7 @@ describe("findSafeRestorePoint", () => {
       loop_id: "test",
       // engine.ts persists `success: true` on lineage entries — the shape
       // that previously masked dirty feedback rounds.
-      loop_lineage: { round: rnd, task: `Round ${rnd}`, success: true },
+      loop_lineage: { round: rnd, task: `Round ${rnd}`, outcome: "success" },
     };
   }
 
@@ -682,7 +681,6 @@ describe("findSafeRestorePoint", () => {
 describe("enforcement-gate — v2.12 effective success", () => {
   it("accepts outcome=partial without execution evidence (declared non-success)", () => {
     const selfEval = makeSelfEvaluation({
-      success: true, // Core flag contradicts the optional outcome, which wins.
       outcome: "partial",
       output_summary: "partial progress",
       constraint_violations: [],
@@ -704,7 +702,7 @@ describe("enforcement-gate — v2.12 effective success", () => {
 describe("enforcement-gate — progress stall: backtrack deadlock guard", () => {
   it("terminates instead of backtracking when a backtrack already committed for this round", () => {
     const curr = se({
-      success: false,
+      outcome: "failed",
       execution_report: makeExecutionReport({
         files_changed: ["src/foo.ts"],
       }),
@@ -724,7 +722,7 @@ describe("enforcement-gate — progress stall: backtrack deadlock guard", () => 
 
   it("still backtracks on a fresh stall window with no committed backtrack", () => {
     const curr = se({
-      success: false,
+      outcome: "failed",
       execution_report: makeExecutionReport({
         files_changed: ["src/foo.ts"],
       }),
@@ -749,7 +747,7 @@ describe("enforcement-gate — progress stall: backtrack deadlock guard", () => 
     // v3.9: the redo's own work is in flight and cannot be in the committed
     // window — without this the abandoned window judges every redo forever.
     const curr = se({
-      success: false,
+      outcome: "failed",
       execution_report: makeExecutionReport({ files_changed: ["src/foo.ts"] }),
     });
     const vault = [vaultRound(1, []), vaultRound(2, []), vaultRound(3, [])];
@@ -763,7 +761,7 @@ describe("enforcement-gate — progress stall: backtrack deadlock guard", () => 
 
   it("keeps the verdict only when the submitted round is proven unchanged", () => {
     const curr = se({
-      success: false,
+      outcome: "failed",
       execution_report: makeExecutionReport({ files_changed: ["src/foo.ts"] }),
     });
     const vault = [vaultRound(1, []), vaultRound(2, []), vaultRound(3, [])];
@@ -788,7 +786,7 @@ describe("enforcement-gate — progress stall: backtrack deadlock guard", () => 
     // The deadlock guard must survive the in-flight excuse: a round that
     // moved nothing after its own rollback is not a recovery checkpoint.
     const curr = se({
-      success: false,
+      outcome: "failed",
       execution_report: makeExecutionReport({ files_changed: ["src/foo.ts"] }),
     });
     const vault = [
@@ -814,7 +812,7 @@ describe("enforcement-gate — R-EVID: evidence contradictions", () => {
     const curr = se({
       execution_report: makeExecutionReport({
         files_changed: ["src/foo.ts"],
-        tests_reported: { passed: 1, failed: 0, skipped: 0 },
+
       }),
     });
     const verify = makeVerificationResult({
@@ -833,57 +831,11 @@ describe("enforcement-gate — R-EVID: evidence contradictions", () => {
     assert.equal(result.check, "required_command_failed");
   });
 
-  it("rejects when reported test results hide failures", () => {
-    const curr = se({
-      execution_report: makeExecutionReport({
-        files_changed: ["src/foo.ts"],
-        tests_reported: { passed: 1, failed: 0, skipped: 0 },
-      }),
-    });
-    const verify = makeVerificationResult({
-      verdict: "contradicted",
-      flags: [
-        makeVerificationFlag({
-          severity: "error",
-          field: "tests_reported",
-          check: "command_evidence_mismatch",
-          detail: 'Agent tests_reported don\'t match "npm test" output: failed: reported 0, command shows 5',
-        }),
-      ],
-    });
-    const result = enforceRound(curr, verify, 4, [], 0);
-    assert.equal(result.action, "reject");
-    assert.equal(result.check, "command_evidence_mismatch");
-  });
-
-  it("rejects on a self-contradictory outcome claim", () => {
-    const curr = se({
-      execution_report: makeExecutionReport({
-        files_changed: ["src/foo.ts"],
-        tests_reported: { passed: 1, failed: 0, skipped: 0 },
-      }),
-    });
-    const verify = makeVerificationResult({
-      verdict: "contradicted",
-      flags: [
-        makeVerificationFlag({
-          severity: "error",
-          field: "outcome",
-          check: "outcome_success_contradiction",
-          detail: "outcome=success but success=false — self-contradiction",
-        }),
-      ],
-    });
-    const result = enforceRound(curr, verify, 4, [], 0);
-    assert.equal(result.action, "reject");
-    assert.equal(result.check, "outcome_success_contradiction");
-  });
-
   it("accepts when the contradiction flags are absent", () => {
     const curr = se({
       execution_report: makeExecutionReport({
         files_changed: ["src/foo.ts"],
-        tests_reported: { passed: 1, failed: 0, skipped: 0 },
+
       }),
     });
     const result = enforceRound(curr, trusted(), 4, [], 0);
@@ -908,7 +860,7 @@ describe("enforcement-gate — v3.3 R-EVID-VERIFY: entrypoint tampering", () => 
     const curr = se({
       execution_report: makeExecutionReport({
         files_changed: ["run-tests.sh"],
-        tests_reported: { passed: 1, failed: 0, skipped: 0 },
+
       }),
     });
     const result = enforceRound(curr, entrypointTainted(), 4, [], 0);
@@ -920,7 +872,7 @@ describe("enforcement-gate — v3.3 R-EVID-VERIFY: entrypoint tampering", () => 
     const curr = se({
       execution_report: makeExecutionReport({
         files_changed: ["src/foo.ts"],
-        tests_reported: { passed: 1, failed: 0, skipped: 0 },
+
       }),
     });
     const verify = makeVerificationResult({
@@ -949,7 +901,7 @@ describe("enforcement-gate — v3.3 R-EVID-VERIFY: entrypoint tampering", () => 
     const curr = se({
       execution_report: makeExecutionReport({
         files_changed: ["src/foo.ts"],
-        tests_reported: { passed: 1, failed: 0, skipped: 0 },
+
       }),
     });
     const verify = makeVerificationResult({
@@ -1004,7 +956,7 @@ describe("v3.2 — R4 machine progress fallback", () => {
 
   it("detects stall from three rounds without git changes on the heuristic path", () => {
     const entries = [feedbackRound(1, []), feedbackRound(2, []), feedbackRound(3, [])];
-    const result = enforceRound(se({ success: false }), trusted(), 4, entries, 0, "", { state: "unchanged", providers: ["git"], coverages: [] });
+    const result = enforceRound(se({ outcome: "failed" }), trusted(), 4, entries, 0, "", { state: "unchanged", providers: ["git"], coverages: [] });
     assert.ok(result, "machine stall must fire where the rule used to self-skip");
     assert.equal(result!.action, "reject");
     assert.equal(result!.check, "progress_stall");
@@ -1012,7 +964,7 @@ describe("v3.2 — R4 machine progress fallback", () => {
 
   it("does not fire when git observed changes in the window", () => {
     const entries = [feedbackRound(1, ["a.ts"]), feedbackRound(2, ["b.ts"]), feedbackRound(3, ["c.ts"])];
-    const result = enforceRound(se({ success: false }), trusted(), 4, entries, 0);
+    const result = enforceRound(se({ outcome: "failed" }), trusted(), 4, entries, 0);
     assert.equal(result!.action, "accept", "observed changes → no stall");
   });
 
@@ -1022,7 +974,7 @@ describe("v3.2 — R4 machine progress fallback", () => {
       committedFeedbackRound(2, { loopId: "test-loop", roundEvidence: [], noExecutionReport: true }),
       committedFeedbackRound(3, { loopId: "test-loop", roundEvidence: [], noExecutionReport: true }),
     ];
-    const result = enforceRound(se({ success: false }), trusted(), 4, entries, 0);
+    const result = enforceRound(se({ outcome: "failed" }), trusted(), 4, entries, 0);
     assert.equal(result!.action, "accept", "no git signal → the rule keeps skipping");
   });
 });
@@ -1076,7 +1028,7 @@ describe("v3.3 — progress stall exculpatory machine cross-check", () => {
       machineRound(2, 0.31, ["src/a.ts"]),
       machineRound(3, 0.32, []),
     ];
-    const result = enforceRound(se({ success: false }), trusted(), 4, entries, 0);
+    const result = enforceRound(se({ outcome: "failed" }), trusted(), 4, entries, 0);
     assert.equal(result!.action, "accept", "git motion exculpates the delta-based stall");
   });
 
@@ -1093,12 +1045,12 @@ describe("v3.3 — progress stall exculpatory machine cross-check", () => {
       machineRound(3, 0.30, []),
     ];
     const backed = makeVerificationResult({ verdict: "trusted", machineBackedSuccess: true });
-    const accepted = enforceRound(se({ success: true }), backed, 4, entries, 0);
+    const accepted = enforceRound(se({ outcome: "success" }), backed, 4, entries, 0);
     assert.equal(accepted.action, "accept",
       "a machine-verified round must be able to close the loop");
 
     // Without the machine fact the same window still stalls.
-    const stalled = enforceRound(se({ success: false }), trusted(), 4, entries, 0, "", { state: "unchanged", providers: ["git"], coverages: [] });
+    const stalled = enforceRound(se({ outcome: "failed" }), trusted(), 4, entries, 0, "", { state: "unchanged", providers: ["git"], coverages: [] });
     assert.equal(stalled.action, "reject");
     assert.equal(stalled.check, "progress_stall");
   });
@@ -1111,7 +1063,7 @@ describe("v3.3 — progress stall exculpatory machine cross-check", () => {
       machineRound(2, 0.31, []),
       machineRound(3, 0.32, [], ["auth module completed"]),
     ];
-    const result = enforceRound(se({ success: false }), trusted(), 4, entries, 0, "", { state: "unchanged", providers: ["git"], coverages: [] });
+    const result = enforceRound(se({ outcome: "failed" }), trusted(), 4, entries, 0, "", { state: "unchanged", providers: ["git"], coverages: [] });
     assert.equal(result!.action, "reject");
     assert.equal(result!.check, "progress_stall");
   });
@@ -1122,7 +1074,7 @@ describe("v3.3 — progress stall exculpatory machine cross-check", () => {
       machineRound(2, 0.31, []),
       machineRound(3, 0.32, []),
     ];
-    const result = enforceRound(se({ success: false }), trusted(), 4, entries, 0, "", { state: "unchanged", providers: ["git"], coverages: [] });
+    const result = enforceRound(se({ outcome: "failed" }), trusted(), 4, entries, 0, "", { state: "unchanged", providers: ["git"], coverages: [] });
     assert.equal(result!.action, "reject");
     assert.equal(result!.check, "progress_stall");
     // v3.8.1: the machine series decides when it is observable, so the reason
@@ -1143,7 +1095,7 @@ describe("v3.3 — progress stall exculpatory machine cross-check", () => {
       machineRound(2, 0.30, []),
       machineRound(3, 0.30, [], ["auth module completed"]),
     ];
-    const result = enforceRound(se({ success: false }), trusted(), 4, entries, 0, "", { state: "unchanged", providers: ["git"], coverages: [] });
+    const result = enforceRound(se({ outcome: "failed" }), trusted(), 4, entries, 0, "", { state: "unchanged", providers: ["git"], coverages: [] });
     assert.equal(result!.action, "reject");
     assert.equal(result!.check, "progress_stall");
   });
@@ -1154,7 +1106,7 @@ describe("v3.3 — progress stall exculpatory machine cross-check", () => {
       machineRound(2, 0.30, ["src/a.ts"]),
       machineRound(3, 0.30, []),
     ];
-    const result = enforceRound(se({ success: false }), trusted(), 4, entries, 0);
+    const result = enforceRound(se({ outcome: "failed" }), trusted(), 4, entries, 0);
     assert.equal(result!.action, "accept", "git motion exculpates the flatline");
   });
 });
@@ -1218,7 +1170,7 @@ describe("v3.8 — Round Contract item enforcement", () => {
     });
 
   it("verification debt does not reject below the configured streak", () => {
-    const result = enforceRound(se({ success: false }), debtFlag(), 2, [
+    const result = enforceRound(se({ outcome: "failed" }), debtFlag(), 2, [
       declaredRound(itemContract()),
     ], 0);
     assert.equal(result.action, "accept");
@@ -1226,7 +1178,7 @@ describe("v3.8 — Round Contract item enforcement", () => {
 
   it("verification debt rejects once the streak reaches the limit", () => {
     const contract = itemContract();
-    const result = enforceRound(se({ success: false }), debtFlag(), 4, [
+    const result = enforceRound(se({ outcome: "failed" }), debtFlag(), 4, [
       declaredRound(contract), priorDebt(contract, 2), priorDebt(contract, 3),
     ], 0);
     assert.equal(result.action, "reject");
@@ -1238,7 +1190,7 @@ describe("v3.8 — Round Contract item enforcement", () => {
     // v3.8.1: the streak must belong to THIS check — the same rule every
     // uniform row applies. An unrelated streak is covered below.
     const contract = itemContract();
-    const result = enforceRound(se({ success: false }), debtFlag(), 4, [
+    const result = enforceRound(se({ outcome: "failed" }), debtFlag(), 4, [
       declaredRound(contract), priorDebt(contract, 2), priorDebt(contract, 3),
     ], 2, "contract_items_unverified");
     assert.equal(result.action, "terminate");
@@ -1251,7 +1203,7 @@ describe("v3.8 — Round Contract item enforcement", () => {
     // earned by a DIFFERENT check turn this row's FIRST appearance into a
     // termination as `incomplete`.
     const contract = itemContract();
-    const result = enforceRound(se({ success: false }), debtFlag(), 4, [
+    const result = enforceRound(se({ outcome: "failed" }), debtFlag(), 4, [
       declaredRound(contract), priorDebt(contract, 2), priorDebt(contract, 3),
     ], 2, "required_command_failed");
     assert.equal(result.action, "reject",
@@ -1263,7 +1215,7 @@ describe("v3.8 — Round Contract item enforcement", () => {
     // The handler owns this row's ladder; the uniform block used to apply the
     // ladder again, so one fix_instructions carried the notice twice.
     const contract = itemContract();
-    const result = enforceRound(se({ success: false }), debtFlag(), 4, [
+    const result = enforceRound(se({ outcome: "failed" }), debtFlag(), 4, [
       declaredRound(contract), priorDebt(contract, 2), priorDebt(contract, 3),
     ], 1, "contract_items_unverified");
     assert.equal(result.action, "reject");
@@ -1272,7 +1224,7 @@ describe("v3.8 — Round Contract item enforcement", () => {
   });
 
   it("scope drift never rejects (v3.9.9: report-only fact)", () => {
-    const result = enforceRound(se({ success: false }), scopeDriftFlag(), 3, [], 0);
+    const result = enforceRound(se({ outcome: "failed" }), scopeDriftFlag(), 3, [], 0);
     assert.equal(result.action, "accept");
   });
 
@@ -1281,7 +1233,7 @@ describe("v3.8 — Round Contract item enforcement", () => {
     // its count. The gate treats it as "no current check", so the
     // max_rejections catch-all does not fire.
     const result = enforceRound(
-      se({ success: false }), scopeDriftFlag(), 3, [], 2, "round_scope_drift");
+      se({ outcome: "failed" }), scopeDriftFlag(), 3, [], 2, "round_scope_drift");
     assert.equal(result.action, "accept");
   });
 });
@@ -1311,7 +1263,7 @@ describe("v3.7 — behavior-equality compatibility matrix", () => {
   const okEval = (): SelfEvaluation => se({
     execution_report: makeExecutionReport({
       files_changed: ["src/foo.ts"],
-      tests_reported: { passed: 1, failed: 0, skipped: 0 },
+
     }),
   });
 
@@ -1370,9 +1322,6 @@ describe("v3.7 — behavior-equality compatibility matrix", () => {
 
     // ── evidence contradiction family (uniform ladder) ──────────────────────
     { name: "required command failed rejects", flags: [flag("error", "required_command_failed")], expected: "reject", check: "required_command_failed" },
-    { name: "command evidence mismatch rejects", flags: [flag("error", "command_evidence_mismatch")], expected: "reject", check: "command_evidence_mismatch" },
-    { name: "outcome success contradiction (error arm) rejects", flags: [flag("error", "outcome_success_contradiction")], expected: "reject", check: "outcome_success_contradiction" },
-    { name: "outcome contradiction warn arm is not enforced (accept)", flags: [flag("warn", "outcome_success_contradiction")], expected: "accept" },
     { name: "evidence contradiction third strike terminates", flags: [flag("error", "required_command_failed")], strikes: 2, expected: "terminate" },
 
     // ── verification_entrypoint_modified ─────────────────────────────────────

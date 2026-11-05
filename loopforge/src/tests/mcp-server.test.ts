@@ -145,7 +145,7 @@ describe("MCP stdio input boundary", () => {
         arguments: {
           submissionHandle,
           evaluation: {
-            success: "yes",
+            outcome: "nope",
             output_summary: "done",
             should_continue: false,
             constraint_violations: [],
@@ -164,7 +164,7 @@ describe("MCP stdio input boundary", () => {
       assert.deepEqual(
         ((toolError.details as Record<string, unknown>).invalid as Array<Record<string, unknown>>)
           .map((item) => item.field),
-        ["success"],
+        ["outcome"],
       );
 
       const unknownField = await rpc.request("tools/call", {
@@ -181,7 +181,7 @@ describe("MCP stdio input boundary", () => {
         name: "loopforge_next",
         arguments: {
           evaluation: {
-            success: true,
+            outcome: "success",
             output_summary: "done",
             should_continue: false,
             constraint_violations: [],

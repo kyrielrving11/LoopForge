@@ -123,13 +123,13 @@ function feedbackEntry(
             : {}),
           ...(opts.after ? { afterEvidence: opts.after } : {}),
           evaluation: {
-            success: true,
+            outcome: "partial",
             output_summary: `round ${round}`,
             constraint_violations: [],
             should_continue: true,
           },
           submittedFields: [
-            "success", "output_summary", "constraint_violations", "should_continue",
+            "outcome", "output_summary", "constraint_violations", "should_continue",
           ],
           createdAt: 0,
           updatedAt: 0,
@@ -137,7 +137,8 @@ function feedbackEntry(
         result: {
           action: "continue",
           verificationFlags: [],
-          agentSuccessClaim: true,
+          agentSuccessClaim: false,
+          agentOutcome: "partial",
           evidencePosture: fixtureEvidencePosture(round),
         },
       },

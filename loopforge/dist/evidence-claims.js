@@ -2,8 +2,9 @@
  *  which Agent-reported criteria completions are backed by machine evidence.
  *
  *  v4.0.3 changes the ONLY upgrade path: a claim becomes `verified` when its
- *  criterion id is in the machine-verified set. Agent-reported test counts
- *  (`tests_reported`) are never evidence and can no longer upgrade a claim.
+ *  criterion id is in the machine-verified set. v4.0.6 reads the ONE
+ *  `execution_report.claims` channel and filters `cr-` entries; `rci-` entries
+ *  are contract-item claims, not criterion claims.
  *
  *  Pure functions, no persistence. The inputs (evaluation, machine criterion
  *  facts, verification flags) are already committed, so every claim view can
@@ -18,7 +19,6 @@ import { deriveCriterionId, isCriterionId } from "./token-utils.js";
 // create a verification-gate ⇄ evidence-claims import cycle.
 const CONTRADICTING_CHECKS = new Set([
     "required_command_failed",
-    "command_evidence_mismatch",
     "success_with_remaining_criteria",
 ]);
 /** v4.0.3: the ONLY criterion ids a claim may upgrade to `verified`.
@@ -38,7 +38,7 @@ export function machineVerifiedCriterionIds(input) {
         for (const item of input.activeContract.items) {
             if (statusById.get(item.id) !== "verified")
                 continue;
-            for (const ref of item.criterion_refs) {
+            for (const ref of item.criterion_refs ?? []) {
                 if (isCriterionId(ref))
                     ids.add(ref);
             }

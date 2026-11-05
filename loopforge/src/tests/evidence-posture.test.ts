@@ -114,7 +114,7 @@ function delta(
 
 function claim(overrides: Partial<SelfEvaluation> = {}): SelfEvaluation {
   return makeSelfEvaluation({
-    success: true,
+    outcome: "partial",
     output_summary: "did work",
     constraint_violations: [],
     should_continue: true,
@@ -195,7 +195,7 @@ describe("deriveEvidencePosture — judgment table", () => {
     const posture = deriveEvidencePosture(input({
       round: 4,
       kind: "rollback",
-      selfEval: claim({ success: true }),
+      selfEval: claim({ outcome: "success" }),
       verificationFlags: [makeVerificationFlag({
         severity: "error",
         field: "success",
@@ -218,7 +218,7 @@ describe("deriveEvidencePosture — judgment table", () => {
 
   it("no claim, no contract and no verification capability is not_applicable", () => {
     const posture = deriveEvidencePosture(input({
-      selfEval: claim({ success: false }),
+      selfEval: claim({ outcome: "failed" }),
       afterEvidence: [commandObservation("verify", "passed")],
       evidenceDeltas: [delta(commandObservation("verify", "passed"))],
     }));
@@ -233,7 +233,7 @@ describe("deriveEvidencePosture — judgment table", () => {
   it("a fully verified contract with no success claim is verified coverage", () => {
     const contract = activeContract([{ id: "rci-00000001", criterionRefs: ["cr-00000001"] }]);
     const posture = deriveEvidencePosture(input({
-      selfEval: claim({ success: false }),
+      selfEval: claim({ outcome: "failed" }),
       activeContract: contract,
       contractStatuses: statuses({
         contractId: contract.id,
@@ -251,7 +251,7 @@ describe("deriveEvidencePosture — judgment table", () => {
 
   it("a success claim with no verification capability is insufficient", () => {
     const posture = deriveEvidencePosture(input({
-      selfEval: claim(),
+      selfEval: claim({ outcome: "success" }),
     }));
     assert.equal(posture.status, "insufficient");
     assert.equal(posture.verificationConfigured, false);
@@ -259,7 +259,7 @@ describe("deriveEvidencePosture — judgment table", () => {
 
   it("a success claim backed by the verification gate is verified", () => {
     const posture = deriveEvidencePosture(input({
-      selfEval: claim(),
+      selfEval: claim({ outcome: "success" }),
       machineBackedSuccess: true,
       afterEvidence: [commandObservation("verify", "passed")],
       evidenceDeltas: [delta(commandObservation("verify", "passed"))],
@@ -271,7 +271,7 @@ describe("deriveEvidencePosture — judgment table", () => {
 
   it("a passed command does not back a claim the gate rejected", () => {
     const posture = deriveEvidencePosture(input({
-      selfEval: claim(),
+      selfEval: claim({ outcome: "success" }),
       machineBackedSuccess: false,
       afterEvidence: [commandObservation("verify", "passed")],
       evidenceDeltas: [delta(commandObservation("verify", "passed"))],

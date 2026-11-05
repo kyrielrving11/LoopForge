@@ -21,8 +21,8 @@ const EMPTY_VIEW = {
 function itemClaims(item, slices) {
     const claims = [];
     for (const slice of slices) {
-        for (const claim of slice.report?.contract_item_claims ?? []) {
-            if (claim.item_id === item.id)
+        for (const claim of slice.report?.claims ?? []) {
+            if (claim.id === item.id)
                 claims.push({ round: slice.round, outcome: claim.outcome });
         }
     }
@@ -119,14 +119,14 @@ export function deriveContractItemStatuses(input) {
             blocked: round.evaluation
                 ? declaresBlocked(round.evaluation)
                 : round.agentOutcome === "blocked",
-            transition: round.contractTransition,
+            redirect: round.contractRedirect,
         })),
         {
             round: input.currentRound,
             report: input.currentReport,
             deltas: input.currentDeltas,
             blocked: input.currentBlocked === true,
-            transition: input.currentTransition ?? null,
+            redirect: input.currentRedirect ?? null,
         },
     ].filter((slice) => slice.round < input.currentRound || slice.round === input.currentRound);
     const enabledCommands = new Set(input.commands.filter((command) => command.enabled).map((command) => command.name));
@@ -170,15 +170,15 @@ export function deriveContractItemStatuses(input) {
     const committingRound = slices[slices.length - 1];
     const blocked = committingRound?.blocked === true;
     const allVerified = items.length > 0 && verifiedCount === items.length;
-    // v3.9.9 closure priority: blocked > superseded > verified > open.
+    // v3.9.9/v4.0.6 closure priority: blocked > superseded > verified > open.
     // A blocked declaration is the Agent's protocol action and closes the
-    // contract first. A transition supersedes only when its target is THIS
+    // contract first. A redirect supersedes only when its target is THIS
     // contract; an inert/abnormal target is ignored rather than closing a
     // contract the Agent never named.
     const superseded = !blocked &&
-        committingRound?.transition !== null &&
-        committingRound?.transition !== undefined &&
-        committingRound.transition.contract_id === contract.id;
+        committingRound?.redirect !== null &&
+        committingRound?.redirect !== undefined &&
+        committingRound.redirect.contract_id === contract.id;
     const closure = blocked ? "blocked"
         : superseded ? "superseded"
             : allVerified ? "verified"

@@ -33,7 +33,7 @@ import { deriveActiveRoundContract } from "./round-contract.js";
 import { deriveSubGoals } from "./subgoal-state.js";
 import { rollbackEvidencePosture } from "./evidence-posture.js";
 import { fieldGuide } from "./submission-guidance.js";
-import { effectiveOutcome } from "./self-eval.js";
+import { effectiveOutcome, effectiveSuccess } from "./self-eval.js";
 import { deriveFieldAccounting } from "./field-accounting.js";
 import { deriveFilesReconciliation } from "./files-reconciliation.js";
 import { getPolicy } from "./policy.js";
@@ -127,8 +127,8 @@ function baseReportHandling(
     };
   }
   if (path === "round_contract") {
-    const transition = input.selfEval.contract_transition;
-    if (transition && transition.contract_id === input.facts.contractBefore) {
+    const redirect = input.selfEval.round_contract?.supersedes;
+    if (redirect && redirect.contract_id === input.facts.contractBefore) {
       // v3.9.9: in a transition round the successor is the EFFECTIVE next
       // slice, not an ignored premature proposal.
       return {
@@ -311,12 +311,12 @@ export function deriveSubmissionReceipt(input: ReceiptInput): SubmissionReceipt 
     : null;
   const contractBefore = input.facts.contractBefore;
   const contractAfter = input.facts.contractAfter;
-  // v3.9.9: the receipt's `superseded` fact comes from the COMMITTED
-  // transition and its target, never from inferring a successor out of a
-  // `contract_premature` flag.
-  const transition = selfEval.contract_transition ?? null;
-  const transitionApplied = diffApplied && transition !== null &&
-    contractBefore !== null && transition.contract_id === contractBefore;
+  // v3.9.9/v4.0.6: the receipt's `superseded` fact comes from the COMMITTED
+  // redirect (`round_contract.supersedes`) and its target, never from
+  // inferring a successor out of a `contract_premature` flag.
+  const redirect = selfEval.round_contract?.supersedes ?? null;
+  const redirectApplied = diffApplied && redirect !== null &&
+    contractBefore !== null && redirect.contract_id === contractBefore;
 
   // ── verification ───────────────────────────────────────────────────────
   // v4.0.3: the receipt reads the ONE posture the transaction persisted. It
@@ -337,12 +337,13 @@ export function deriveSubmissionReceipt(input: ReceiptInput): SubmissionReceipt 
     disposition,
     record,
     entered_history: enteredHistory,
-    agent_success_claim: selfEval.success === true,
+    // v4.0.6: the success claim is a derived projection of `outcome`.
+    agent_success_claim: effectiveSuccess(selfEval),
     agent_outcome: effectiveOutcome(selfEval),
-    // v4.0.4: derived read-view fields. `loop_stop_reason` is the SAME
-    // `pr.stopReason` every other live surface reports; neither field is
-    // persisted in the receipt and neither is a second source.
-    agent_stop_reason: selfEval.agent_stop_reason ?? null,
+    objective_refinement: selfEval.objective_refinement ?? null,
+    // v4.0.4: derived read-view field. `loop_stop_reason` is the SAME
+    // `pr.stopReason` every other live surface reports; it is not persisted
+    // in the receipt and is never a second source.
     loop_stop_reason: pr.stopReason ?? null,
     ...(recoveryCheckpoint ? { recovery_checkpoint: recoveryCheckpoint } : {}),
     reports: [...reports.values()],
@@ -352,11 +353,11 @@ export function deriveSubmissionReceipt(input: ReceiptInput): SubmissionReceipt 
         after_id: contractAfter,
         activated: diffApplied && contractAfter !== null && contractBefore !== contractAfter,
         closed: diffApplied && contractBefore !== null && contractBefore !== contractAfter,
-        ...(transitionApplied
+        ...(redirectApplied
           ? {
               superseded: true,
-              ...(transition?.reason
-                ? { transition_reason: transition.reason }
+              ...(redirect?.reason
+                ? { redirect_reason: redirect.reason }
                 : {}),
             }
           : {}),
@@ -431,7 +432,7 @@ export function deriveCommittedSubmissionView(
     rounds: afterRounds,
   });
   const selfEval = view.evaluation ?? {
-    success: view.agentSuccessClaim,
+    outcome: view.agentOutcome ?? "failed",
     output_summary: "",
     constraint_violations: [],
     should_continue: view.action === "continue",

@@ -21,8 +21,7 @@ import { createInterface, Interface } from "node:readline";
 import {
   writeMachineBackedPolicy,
   criterionClaims,
-  DEFAULT_SUCCESS_CRITERION,
-} from "./_helpers.js";
+  DEFAULT_SUCCESS_CRITERION, withDefaultContract } from "./_helpers.js";
 import { fileURLToPath } from "node:url";
 
 // ── MCP stdio client ─────────────────────────────────────────────────────────
@@ -164,7 +163,10 @@ describe("E2E MCP lifecycle", () => {
     // v3.3: the CLI subprocess loads policy from its own cwd — write a
     // machine-backed policy (passing verification command) so success
     // claims with self-reported test results are not rejected by R8.
-    writeMachineBackedPolicy(storeDir);
+    // v4.0.6: this suite exercises lifecycle/tool transport, not contract
+    // coverage. With no after-capable command, continuing rounds need no
+    // Round Contract and the historical levels/assertions stay meaningful.
+    writeMachineBackedPolicy(storeDir, { commands: [] });
     client = new McpClient(storeDir);
   });
 
@@ -245,7 +247,7 @@ describe("E2E MCP lifecycle", () => {
     const result = await client.tool("loopforge_next", {
       submissionHandle,
       evaluation: {
-        success: false,
+        outcome: "failed",
         output_summary:
           "Inspected verification-gate.ts. Found no correctness bugs in the main check functions. " +
           "Added cross-validation note for command evidence output.",
@@ -256,8 +258,8 @@ describe("E2E MCP lifecycle", () => {
         ],
         execution_report: {
           files_changed: ["src/verification-gate.ts"],
-          tests_reported: { passed: 243, failed: 0, skipped: 0 },
-          criterion_claims: criterionClaims(["Audited verification-gate.ts"]),
+
+          claims: criterionClaims(["Audited verification-gate.ts"]),
           success_criteria_remaining: [
             "Fix any confirmed correctness bugs",
             "Preserve the public API",
@@ -307,14 +309,14 @@ describe("E2E MCP lifecycle", () => {
     const result = await client.tool("loopforge_next", {
       submissionHandle,
       evaluation: {
-        success: true,
+        outcome: "success",
         output_summary: "Changed internal function signature.",
-        should_continue: true,
+        should_continue: false,
         constraint_violations: ["Do not change the public API"],
         execution_report: {
           files_changed: [],
-          tests_reported: { passed: 0, failed: 5, skipped: 0 },
-          criterion_claims: criterionClaims([], [DEFAULT_SUCCESS_CRITERION]),
+
+          claims: criterionClaims([], [DEFAULT_SUCCESS_CRITERION]),
         },
       },
     });
@@ -348,7 +350,7 @@ describe("E2E MCP lifecycle", () => {
     const result = await client.tool("loopforge_next", {
       submissionHandle,
       evaluation: {
-        success: false,
+        outcome: "failed",
         output_summary:
           "Reverted the accidental public API change. Restored original signatures. Tests pass.",
         should_continue: true,
@@ -356,8 +358,8 @@ describe("E2E MCP lifecycle", () => {
         discovered_constraints: [],
         execution_report: {
           files_changed: ["src/verification-gate.ts"],
-          tests_reported: { passed: 243, failed: 0, skipped: 0 },
-          criterion_claims: criterionClaims(["Preserve the public API — verified restored"]),
+
+          claims: criterionClaims(["Preserve the public API — verified restored"]),
           success_criteria_remaining: [
             "Fix any confirmed correctness bugs",
           ],
@@ -411,7 +413,7 @@ describe("E2E MCP lifecycle", () => {
     const result = await client.tool("loopforge_next", {
       submissionHandle,
       evaluation: {
-        success: true,
+        outcome: "success",
         output_summary:
           "Completed audit of verification-gate.ts. All checks verified, no " +
           "correctness bugs found. All constraints preserved. All tests pass.",
@@ -419,13 +421,13 @@ describe("E2E MCP lifecycle", () => {
         constraint_violations: [],
         execution_report: {
           files_changed: ["src/verification-gate.ts"],
-          tests_reported: { passed: 243, failed: 0, skipped: 0 },
+
           success_criteria_met: [
             "Audited verification-gate.ts",
             "Fix any confirmed correctness bugs — none found",
             "Preserve the public API",
           ],
-          criterion_claims: criterionClaims([], []),
+          claims: criterionClaims([], []),
         },
       },
     });

@@ -30,14 +30,14 @@ import { criterionClaims } from "./_helpers.js";
 import { advanceWithHeld } from "./_helpers.js";
 
 const continuingEvaluation = (): SelfEvaluation => ({
-  success: false,
+  outcome: "failed",
   output_summary: "made progress",
   constraint_violations: [],
   should_continue: true,
   execution_report: {
     files_changed: ["src/a.ts"],
-    tests_reported: { passed: 1, failed: 0, skipped: 0 },
-    criterion_claims: criterionClaims([], ["more"]),
+
+    claims: criterionClaims([], ["more"]),
   },
 });
 

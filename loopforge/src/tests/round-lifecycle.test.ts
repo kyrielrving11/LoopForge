@@ -94,18 +94,31 @@ function makeSessionEntry(overrides: {
 
 /** SelfEvaluation with minimal execution evidence so the enforcement gate
  *  doesn't reject the round (same shape as mcp.test.ts agentOutput). */
-function evalFor(opts: { success?: boolean; shouldContinue?: boolean }): SelfEvaluation {
-  const success = opts.success ?? true;
+function evalFor(opts: {
+  success?: boolean;
+  outcome?: "success" | "partial" | "failed" | "blocked";
+  shouldContinue?: boolean;
+}): SelfEvaluation {
+  const outcome = opts.outcome ?? (opts.success ?? true ? "success" : "failed");
+  const success = outcome === "success";
+  const shouldContinue = opts.shouldContinue ?? true;
   return {
-    success,
+    outcome,
     output_summary: "Completed the task successfully.",
     constraint_violations: [],
-    should_continue: opts.shouldContinue ?? true,
+    should_continue: shouldContinue,
+    ...(shouldContinue
+      ? {
+          round_contract: {
+            work_item: "test slice",
+            items: [{ description: "acceptance", verify_with: ["verify"] }],
+          },
+        }
+      : {}),
     execution_report: success
       ? {
           files_changed: ["src/test.ts"],
-          tests_reported: { passed: 1, failed: 0, skipped: 0 },
-          criterion_claims: criterionClaims([], []),
+          claims: criterionClaims([], []),
         }
       : undefined,
   } as SelfEvaluation;
@@ -414,7 +427,7 @@ describe("RoundLifecycle — resume / crash window", async () => {
       loopId: session.loopId,
       task: session.task,
       maxRounds: session.maxRounds,
-      selfEval: evalFor({ success: true, shouldContinue: true }),
+      selfEval: evalFor({ outcome: "partial", shouldContinue: true }),
       consecutiveRejections: 0,
     });
 
@@ -445,7 +458,7 @@ describe("RoundLifecycle — resume / crash window", async () => {
       loopId: session.loopId,
       task: session.task,
       maxRounds: session.maxRounds,
-      selfEval: evalFor({ success: true, shouldContinue: false }),
+      selfEval: evalFor({ outcome: "success", shouldContinue: false }),
       consecutiveRejections: 0,
     });
 
@@ -479,7 +492,7 @@ describe("RoundLifecycle — advance", async () => {
     const racing = makeLifecycle(store, registry);
 
     const advancing = racing.advance(
-      sid, "agent output", evalFor({ success: true }),
+      sid, "agent output", evalFor({ outcome: "partial" }),
     );
     mgr.get(sid)!.status = "paused";
     const result = await advancing;
@@ -504,7 +517,7 @@ describe("RoundLifecycle — advance", async () => {
     registry.upsert(mgr.get(sid)!);
     const racing = makeLifecycle(store, registry);
     const advancing = racing.advance(
-      sid, "agent output", evalFor({ success: true }),
+      sid, "agent output", evalFor({ outcome: "partial" }),
     );
     mgr.pause(sid);
     const result = await advancing;
@@ -521,9 +534,10 @@ describe("RoundLifecycle — advance", async () => {
     assert.ok(resumed);
     assert.equal(resumed.round, 2, "resume must compile the next round, not skip it");
     assert.ok(resumed.prompt);
-    // L1: pause() persisted the trajectory AFTER round 1's success was
-    // pushed — the crash-window reconcile must not push it a second time.
-    assert.deepEqual(mgr2.getMachineBackedSuccessTrajectory("pause-race"), [true],
-      "unpause must not duplicate round 1 in the success trajectory");
+    // v4.0.6: a RUNNING round is partial (success must stop), so it never
+    // enters the machine-backed success trajectory. The reconcile must not
+    // invent one for the paused round.
+    assert.deepEqual(mgr2.getMachineBackedSuccessTrajectory("pause-race"), [],
+      "unpause must not duplicate or invent a success trajectory entry");
   });
 });

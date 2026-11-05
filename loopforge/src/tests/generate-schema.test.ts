@@ -71,15 +71,17 @@ describe("v3.8.1 — schema fidelity", () => {
     }
   });
 
-  it("an inline object type publishes an object, not a string", () => {
-    const reported = props("ExecutionReport").tests_reported as Record<string, unknown>;
-    const reportedObject = ((reported.anyOf ?? []) as Array<Record<string, unknown>>)
-      .find((branch) => branch.type === "object");
-    assert.ok(reportedObject, "tests_reported is an object (or null)");
-    assert.deepEqual(
-      Object.keys(reportedObject!.properties as Record<string, unknown>).sort(),
-      ["failed", "passed", "skipped"],
-    );
+  it("v4.0.6: ExecutionReport publishes the ONE claims channel", () => {
+    const report = props("ExecutionReport") as Record<string, unknown>;
+    assert.ok(!("tests_reported" in report), "tests_reported was removed");
+    assert.ok(!("criterion_claims" in report), "criterion_claims was removed");
+    assert.ok(!("contract_item_claims" in report), "contract_item_claims was removed");
+    const claims = report.claims as Record<string, unknown>;
+    assert.equal(claims.type, "array");
+    const item = claims.items as Record<string, unknown>;
+    assert.equal(item.$ref, "#/$defs/ExecutionClaim");
+    const claim = (def("ExecutionClaim").properties as Record<string, unknown>);
+    assert.deepEqual(Object.keys(claim).sort(), ["id", "outcome"]);
   });
 
   it("a `typeof CONST` is published as the constant it is", () => {
@@ -89,7 +91,7 @@ describe("v3.8.1 — schema fidelity", () => {
     // must read it rather than guess.
     const version = props("PromptArtifact").schemaVersion;
     assert.equal(version.type, "number", "the artifact schema version is a number");
-    assert.equal(version.const, 11);
+    assert.equal(version.const, 12);
   });
 });
 
@@ -144,7 +146,14 @@ describe("Generated JSON Schema — top-level", () => {
     // v4.0.3: RoundVerificationStatus and EvidenceSnapshot were deleted;
     // EvidencePostureStatus/EvidencePosture/WorkingMemorySourceCounts joined
     // (68 → 69).
-    assert.equal(names.length, 69, `expected 69, got ${names.length}: ${names.join(", ")}`);
+    // v4.0.6: CriterionClaim, ContractItemClaim and ContractTransition were
+    // removed; ExecutionClaim and ContractSupersede joined (69 → 68).
+    assert.equal(names.length, 68, `expected 68, got ${names.length}: ${names.join(", ")}`);
+    assert.ok(names.includes("ExecutionClaim"));
+    assert.ok(names.includes("ContractSupersede"));
+    assert.ok(!names.includes("CriterionClaim"));
+    assert.ok(!names.includes("ContractItemClaim"));
+    assert.ok(!names.includes("ContractTransition"));
     assert.ok(names.includes("SubmissionHandle"));
     assert.ok(names.includes("PromptArtifact"));
     assert.ok(names.includes("RoundOutcome"));

@@ -12,7 +12,7 @@ const LOOP_ID = "legacy-loop";
 
 function storeWithLegacyRound(): MemoryLoopStore {
   const store = new MemoryLoopStore();
-  const feedback = committedFeedbackRound(1, { loopId: LOOP_ID, success: true });
+  const feedback = committedFeedbackRound(1, { loopId: LOOP_ID, outcome: "success" });
   const transaction = (feedback.loop_lineage as Record<string, unknown>)
     .round_transaction as Record<string, unknown>;
   (transaction.snapshot as Record<string, unknown>).schemaVersion = 5;

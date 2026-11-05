@@ -17,7 +17,7 @@ const TASK = "Implement the parser";
 
 function continuing() {
   return {
-    success: false,
+    outcome: "failed",
     output_summary: "parser skeleton in place",
     constraint_violations: [],
     should_continue: true,

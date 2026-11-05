@@ -220,6 +220,8 @@ describe("v4.0.4 — the skill points at the runtime rules", () => {
     assert.ok(!reference.includes("L0 is a same-round retry"));
     const evidence = skillFile("references/evidence-and-contracts.md");
     assert.ok(!evidence.includes("`stop_reason`"));
-    assert.ok(evidence.includes("agent_stop_reason"));
+    assert.ok(!evidence.includes("agent_stop_reason"));
+    assert.ok(evidence.includes("`outcome`"));
+    assert.ok(evidence.includes("`blocker`"));
   });
 });

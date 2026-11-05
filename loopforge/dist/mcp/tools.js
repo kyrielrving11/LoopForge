@@ -159,11 +159,12 @@ const TOOL_BASE_SCHEMAS = [
                 evaluation: {
                     type: "object",
                     description: "Structured self-evaluation for this round. Required when recovery is absent. Free-text or embedded evaluation blocks are not accepted.",
-                    required: ["success", "output_summary", "should_continue", "constraint_violations"],
+                    required: ["outcome", "output_summary", "should_continue", "constraint_violations"],
                     properties: {
-                        success: {
-                            type: "boolean",
-                            description: fieldGuideDescription("success"),
+                        outcome: {
+                            type: "string",
+                            enum: ["success", "partial", "failed", "blocked"],
+                            description: fieldGuideDescription("outcome"),
                         },
                         output_summary: {
                             type: "string",
@@ -197,38 +198,21 @@ const TOOL_BASE_SCHEMAS = [
                                     items: { type: "string" },
                                     description: fieldGuideDescription("execution_report.files_changed"),
                                 },
-                                tests_reported: {
-                                    type: "object",
-                                    description: fieldGuideDescription("execution_report.tests_reported"),
-                                    properties: {
-                                        passed: { type: "integer", minimum: 0, description: "Number of passing tests." },
-                                        failed: { type: "integer", minimum: 0, description: "Number of failing tests." },
-                                        skipped: { type: "integer", minimum: 0, description: "Number of skipped tests." },
-                                    },
-                                },
-                                criterion_claims: {
+                                claims: {
                                     type: "array",
-                                    description: fieldGuideDescription("execution_report.criterion_claims"),
+                                    maxItems: 100,
+                                    description: fieldGuideDescription("execution_report.claims"),
                                     items: {
                                         type: "object",
                                         properties: {
-                                            criterion_id: { type: "string", description: "cr-XXXXXXXX criterion id (free text allowed)." },
+                                            id: {
+                                                type: "string",
+                                                description: "cr-XXXXXXXX objective criterion id or rci-XXXXXXXX " +
+                                                    "id of an item of the ACTIVE contract.",
+                                            },
                                             outcome: { type: "string", enum: ["met", "remaining"] },
                                         },
-                                        required: ["criterion_id", "outcome"],
-                                        additionalProperties: false,
-                                    },
-                                },
-                                contract_item_claims: {
-                                    type: "array",
-                                    description: fieldGuideDescription("execution_report.contract_item_claims"),
-                                    items: {
-                                        type: "object",
-                                        properties: {
-                                            item_id: { type: "string", description: "rci-XXXXXXXX id of an item of the ACTIVE contract." },
-                                            outcome: { type: "string", enum: ["met", "remaining"], description: "Your claim for that item this round." },
-                                        },
-                                        required: ["item_id", "outcome"],
+                                        required: ["id", "outcome"],
                                         additionalProperties: false,
                                     },
                                 },
@@ -307,22 +291,18 @@ const TOOL_BASE_SCHEMAS = [
                                 required: ["id", "status"],
                             },
                         },
-                        agent_stop_reason: {
-                            type: "string",
-                            enum: ["gave_up", "blocked", "needs_human_input"],
-                            description: fieldGuideDescription("agent_stop_reason"),
-                        },
                         no_change_reason: {
                             type: "string",
                             description: fieldGuideDescription("no_change_reason"),
                         },
-                        outcome: {
+                        objective_refinement: {
                             type: "string",
-                            enum: ["success", "partial", "failed", "blocked"],
-                            description: fieldGuideDescription("outcome"),
+                            maxLength: 1000,
+                            description: fieldGuideDescription("objective_refinement"),
                         },
                         blocker: {
                             type: "string",
+                            maxLength: 500,
                             description: fieldGuideDescription("blocker"),
                         },
                         gate_ids: {
@@ -364,7 +344,7 @@ const TOOL_BASE_SCHEMAS = [
                                         "acceptance condition for the deliverable, bound to its own " +
                                         "evidence commands. The runtime derives a stable " +
                                         "rci-XXXXXXXX id per item and renders it in the prompt — " +
-                                        "cite that id in execution_report.contract_item_claims.",
+                                        "cite that id in execution_report.claims.",
                                     items: {
                                         type: "object",
                                         properties: {
@@ -403,36 +383,34 @@ const TOOL_BASE_SCHEMAS = [
                                     items: { type: "string" },
                                     description: "Optional, report-only. The files/directories you intend " +
                                         "this slice to touch. Omission and [] both mean no declared " +
-                                        "intent. It is NOT enforced: out-of-scope changes are " +
-                                        "reported as an info fact and never reject the round. Max " +
-                                        "50 items.",
+                                        "intent. It is NOT enforced and is not part of the rc- id: " +
+                                        "out-of-scope changes are reported as an info fact and " +
+                                        "never reject the round. Max 50 items.",
+                                },
+                                supersedes: {
+                                    type: "object",
+                                    description: "Optional redirect modifier. Replaces the named ACTIVE " +
+                                        "contract with this proposal's slice; its acceptance items " +
+                                        "must differ. The old contract closes as superseded. Not " +
+                                        "allowed with should_continue=false or outcome=blocked.",
+                                    properties: {
+                                        contract_id: {
+                                            type: "string",
+                                            pattern: "^rc-[a-f0-9]{8}$",
+                                            description: "The rc-XXXXXXXX id of the ACTIVE contract rendered in " +
+                                                "this prompt. A stale/other id is rejected.",
+                                        },
+                                        reason: {
+                                            type: "string",
+                                            maxLength: 500,
+                                            description: "Optional Agent report, recorded verbatim for audit only.",
+                                        },
+                                    },
+                                    required: ["contract_id"],
+                                    additionalProperties: false,
                                 },
                             },
                             required: ["work_item", "items"],
-                            additionalProperties: false,
-                        },
-                        contract_transition: {
-                            type: "object",
-                            description: fieldGuideDescription("contract_transition"),
-                            properties: {
-                                kind: {
-                                    type: "string",
-                                    const: "supersede",
-                                    description: "Only \"supersede\" is supported.",
-                                },
-                                contract_id: {
-                                    type: "string",
-                                    pattern: "^rc-[a-f0-9]{8}$",
-                                    description: "The rc-XXXXXXXX id of the ACTIVE contract rendered in " +
-                                        "this prompt. A stale/other id is rejected.",
-                                },
-                                reason: {
-                                    type: "string",
-                                    maxLength: 500,
-                                    description: "Optional Agent report, recorded verbatim for audit only.",
-                                },
-                            },
-                            required: ["kind", "contract_id"],
                             additionalProperties: false,
                         },
                     },
@@ -711,7 +689,7 @@ const ADVANCE_OUTPUT_SCHEMA = {
                 "stalled", "enforcement_terminated", "paused", "incomplete", null,
             ],
             description: "v4.0.4: LoopForge's terminal reason. Never a session status, a tool " +
-                "error or the Agent's declared agent_stop_reason.",
+                "error or the Agent's round outcome.",
         },
         sessionStatus: {
             enum: ["running", "stopped", "paused", "stalled"],
@@ -738,13 +716,7 @@ const ADVANCE_OUTPUT_SCHEMA = {
         agentOutcome: {
             type: ["string", "null"],
             enum: ["success", "partial", "failed", "blocked", null],
-            description: "v4.0.3: the effective Agent-declared outcome.",
-        },
-        agentStopReason: {
-            type: ["string", "null"],
-            enum: ["gave_up", "blocked", "needs_human_input", null],
-            description: "v4.0.4: the Agent's declared stop reason of the round this result " +
-                "is about. An Agent report, never a loop terminal reason.",
+            description: "v4.0.6: the Agent-declared round outcome.",
         },
         agentShouldContinue: {
             type: ["boolean", "null"],
@@ -843,10 +815,6 @@ export const TOOL_OUTPUT_SCHEMAS = {
                     "completed", "failed", "blocked", "cancelled", "max_rounds",
                     "stalled", "enforcement_terminated", "paused", "incomplete", null,
                 ],
-            },
-            agentStopReason: {
-                type: ["string", "null"],
-                enum: ["gave_up", "blocked", "needs_human_input", null],
             },
             agentShouldContinue: { type: ["boolean", "null"] },
             stopDetail: { type: ["string", "null"] },
@@ -1446,7 +1414,8 @@ export const TOOL_HANDLERS = {
                         round: stopped.round,
                         status: stopped.sessionStatus ?? "stopped",
                         loopStopReason: stopped.stopReason ?? null,
-                        agentStopReason: stopped.agentStopReason ?? null,
+                        agentSuccessClaim: stopped.agentSuccessClaim ?? null,
+                        agentOutcome: stopped.agentOutcome ?? null,
                         agentShouldContinue: stopped.agentShouldContinue ?? null,
                         stopDetail: stopped.stopDetail ?? null,
                         last_submission: stopped.submission_receipt ?? null,

@@ -82,13 +82,13 @@ rewrites the loop task, objective, criteria, constraints or Round Contract;
 omitting it makes the prompt state that none was provided.
 
 Round results keep three kinds of facts separate: the **Agent report**
-(`success_claim`, `outcome`, `agent_stop_reason`), the **LoopForge decision**
-(`action`, `loop_stop_reason`, `enforcement_reason`), and the persisted
-**Machine evidence** (the round's `evidencePosture`). Explain, a terminal
-`stopDetail` and `resume` of a stopped loop render the same blocks. `completed`
-means the Agent's stop declaration passed the gates; it does not imply
-machine-backed success. `agent_stop_reason` is the Agent's report, never a loop
-terminal reason.
+(`success_claim`, `outcome`, `blocker`), the **LoopForge decision** (`action`,
+`loop_stop_reason`, `enforcement_reason`), and the persisted **Machine
+evidence** (the round's `evidencePosture`). Explain, a terminal `stopDetail` and
+`resume` of a stopped loop render the same blocks. `completed` means the Agent's
+stop declaration passed the gates; it does not imply machine-backed success.
+`outcome` is the Agent's ONE round conclusion; there is no separate Agent stop
+reason, and `blocker` is its text explanation.
 
 A clean-context prompt carries compact Machine Evidence (the previous committed
 round's evidence posture: workspace/change counts, provider and command
@@ -106,12 +106,18 @@ gate. Older history is available through `loopforge_replay` (`start`/`end`;
 default last 10 committed positions, at most 50 in an explicit window) and
 `loopforge_status view: "explain"`.
 
-The four required evaluation fields are `success`, `output_summary`,
+The four required evaluation fields are `outcome`, `output_summary`,
 `constraint_violations`, and `should_continue`. They are the Agent's report,
-not evidence. Optional fields let the Agent report events such as changed files,
-discovered constraints, or contract item claims. `subtask_boundary` /
-`subtask_boundary_label` declare an L2 rehydration boundary; they are not a
-workspace checkpoint. LoopForge returns guidance with the real references and
+not evidence. `outcome` is one of `success | partial | failed | blocked`;
+`success` requires `should_continue=false`, and `blocked` additionally requires
+a non-empty `blocker`. Optional fields let the Agent report events such as
+changed files, discovered constraints, and one `execution_report.claims`
+channel (`cr-` criterion claims are advisory, `rci-` active-contract item
+claims are strict). `objective_refinement` evolves only the overall working
+objective; it never changes operator acceptance, criteria or hard constraints.
+`subtask_boundary` / `subtask_boundary_label` declare an L2 rehydration boundary;
+they are not a workspace checkpoint. `retroactiveClaims` remains a separate
+free-text claim channel checked against a prior round's Git evidence. LoopForge returns guidance with the real references and
 currently applicable fields, plus a receipt that distinguishes saved reports
 from derived effects and machine verification. Read surfaces use
 `agentSuccessClaim`/`agentOutcome` for the Agent's claim and
@@ -137,17 +143,22 @@ structure, references, and bindings; the Agent's optional `scope` is a
 report-only intent statement (drift is an info fact, not a rejection). An item
 becomes verified when the Agent claims it is met and all bound commands pass in
 the closing round with the declared binding intact. A command disabled or
-reconfigured later does not rewrite that historical observation; a claim is
-never upgraded by Agent-reported test counts. LoopForge does not judge whether
-the deliverable or its tests are semantically appropriate.
+reconfigured later does not rewrite that historical observation; only command
+observations are test facts, never an Agent-reported test count. LoopForge does
+not judge whether the deliverable or its tests are semantically appropriate.
 
-If the active slice is no longer the right route, the Agent can submit an
-explicit `contract_transition` (kind `supersede`, the exact active `rc-*` id,
-and a successor `round_contract` whose acceptance items actually change). The
-old contract closes as `superseded`; its item statuses remain in audit/explain,
-the workspace is not restored, and the redirect round cannot be `completed`.
-A stale target, missing successor, blocked declaration, stop, or unchanged
-items is `contract_invalid`.
+With an after-capable command configured, a continuing round must leave an
+ACTIVE contract for the next round: omit `round_contract` to continue the
+current contract, or declare the next slice. A different proposal while the
+contract is open is rejected as `contract_premature` unless it carries
+`round_contract.supersedes` targeting the exact active `rc-*` id; a successor
+for a closed contract must change the acceptance items or it is rejected as
+`contract_successor_unchanged`. Stopping and blocked rounds cannot leave a
+proposal (`contract_on_stop`). The old contract closes as `superseded`; its item
+statuses remain in audit/explain, the workspace is not restored, and the
+redirect round cannot be `completed`. A stale target or unchanged items is
+`contract_invalid`. `scope` is report-only and, like `supersedes`, never
+participates in `rc-*` identity.
 
 Progress is a Git workspace fact with an explicit coverage range. The stall rule
 and prompt freshness consume only that fixed coverage. A custom observation is

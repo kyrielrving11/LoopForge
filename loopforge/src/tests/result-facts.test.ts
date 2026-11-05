@@ -13,9 +13,8 @@ function facts(overrides: Partial<ResultFacts> = {}): ResultFacts {
     agent: {
       successClaim: true,
       outcome: "success",
-      outcomeDeclared: null,
       shouldContinue: false,
-      agentStopReason: null,
+      blocker: null,
     },
     loopforge: {
       action: "stop",
@@ -58,31 +57,59 @@ describe("v4.0.4 — result facts stay separate", () => {
     assert.ok(!rendered.includes("Task completed"));
   });
 
-  it("distinguishes a derived outcome from a declared one", () => {
-    const derived = text(facts({
+  it("renders the declared outcome without a derived/declared split", () => {
+    const rendered = text(facts({
       agent: {
         successClaim: false,
         outcome: "failed",
-        outcomeDeclared: null,
         shouldContinue: false,
-        agentStopReason: "blocked",
+        blocker: null,
       },
       loopforge: { action: "stop", loopStopReason: "failed", enforcementReason: null },
     }));
-    assert.ok(derived.includes("outcome: failed (derived; declared: none)"));
-    assert.ok(derived.includes("agent_stop_reason: blocked"));
+    assert.ok(rendered.includes("outcome: failed"));
+    assert.ok(rendered.includes("blocker: none"));
+    assert.ok(!rendered.includes("derived; declared"));
+    assert.ok(!rendered.includes("agent_stop_reason"));
 
     const declared = text(facts({
       agent: {
         successClaim: false,
         outcome: "partial",
-        outcomeDeclared: "partial",
         shouldContinue: true,
-        agentStopReason: null,
+        blocker: null,
       },
     }));
-    assert.ok(declared.includes("outcome: partial (declared)"));
-    assert.ok(declared.includes("agent_stop_reason: none"));
+    assert.ok(declared.includes("outcome: partial"));
+    assert.ok(!declared.includes("agent_stop_reason"));
+  });
+
+  it("v4.0.6: renders the Agent's blocker text on a blocked stop", () => {
+    const rendered = text(facts({
+      agent: {
+        successClaim: false,
+        outcome: "blocked",
+        shouldContinue: false,
+        blocker: "needs the operator to choose the target database",
+      },
+      loopforge: { action: "stop", loopStopReason: "blocked", enforcementReason: null },
+    }));
+    assert.ok(rendered.includes("outcome: blocked"));
+    assert.ok(rendered.includes(
+      "blocker: needs the operator to choose the target database",
+    ));
+  });
+
+  it("v4.0.6: collapses blocker newlines into one fact line", () => {
+    const rendered = text(facts({
+      agent: {
+        successClaim: false,
+        outcome: "blocked",
+        shouldContinue: false,
+        blocker: "first line\nsecond line",
+      },
+    }));
+    assert.ok(rendered.includes("blocker: first line second line"));
   });
 
   it("a rollback directive has no Agent report", () => {

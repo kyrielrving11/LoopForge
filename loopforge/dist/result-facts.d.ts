@@ -1,4 +1,4 @@
-/** v4.0.4: the ONE presentation of a round's result facts.
+/** v4.0.4 / v4.0.6: the ONE presentation of a round's result facts.
  *
  *  Three kinds of facts stay separate and always appear in this order:
  *    1. Agent report   — what the Agent claimed (never machine evidence).
@@ -9,19 +9,23 @@
  *  This module derives nothing. It formats facts that were already committed
  *  or are already computed by the runtime; it never re-derives `completed`,
  *  `machineBackedSuccess` or a "conflict"/"verdict" boolean.
+ *
+ *  v4.0.6: `outcome` is always declared (there is no `success`-derived
+ *  branch), so the `outcomeDeclared` projection and the Agent stop-reason
+ *  field are gone; the Agent's blocker text replaces that report detail.
+ *  The success claim remains a derived read projection.
  */
-import type { EvidencePosture, RoundOutcome, SelfEvaluation, StopReason } from "./protocol.js";
-export type AgentStopReason = NonNullable<SelfEvaluation["agent_stop_reason"]>;
+import type { EvidencePosture, RoundOutcome, StopReason } from "./protocol.js";
 export interface ResultFacts {
     /** null = a rollback directive or no evaluation: there is no Agent report. */
     agent: {
         successClaim: boolean | null;
-        /** effectiveOutcome(selfEval): declared outcome wins, else success-derived. */
+        /** The Agent-declared outcome (`outcome` is required on an evaluation). */
         outcome: RoundOutcome | null;
-        /** Raw SelfEvaluation.outcome; null means it was derived from success. */
-        outcomeDeclared: RoundOutcome | null;
         shouldContinue: boolean | null;
-        agentStopReason: AgentStopReason | null;
+        /** The Agent's blocker text; required by the boundary when blocked, null
+         *  when the round declared none. */
+        blocker: string | null;
     } | null;
     loopforge: {
         action: "continue" | "stop" | "reject" | "terminate" | "backtrack" | "recovery";

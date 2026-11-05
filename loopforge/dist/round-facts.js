@@ -17,7 +17,7 @@ export const NO_IN_FLIGHT_ROUND = {
     currentReport: null,
     currentDeltas: [],
     currentBlocked: false,
-    currentTransition: null,
+    currentRedirect: null,
     currentOutcome: null,
 };
 export function deriveRoundFacts(input) {
@@ -30,7 +30,7 @@ export function deriveRoundFacts(input) {
         currentDeltas: input.inFlight.currentDeltas,
         currentBlocked: input.inFlight.currentBlocked ??
             input.inFlight.currentOutcome === "blocked",
-        currentTransition: input.inFlight.currentTransition ?? null,
+        currentRedirect: input.inFlight.currentRedirect ?? null,
         commands: input.commands,
     });
     return {
@@ -70,7 +70,7 @@ export function deriveCriterionFacts(input) {
             const itemStatus = statusByItem.get(item.id);
             if (!itemStatus || itemStatus === "pending")
                 continue;
-            for (const ref of item.criterion_refs) {
+            for (const ref of item.criterion_refs ?? []) {
                 if (!isCriterionId(ref))
                     continue;
                 roundBest.set(ref, strongestStatus(roundBest.get(ref), itemStatus));

@@ -116,7 +116,7 @@ describe("cognitive-state compiler", () => {
 
   it("derives deterministic goal identity", () => {
     assert.equal(computeGoalTextHash("A  durable task"), computeGoalTextHash("A durable task"));
-    assert.equal(deriveGoalId("loop", "Task", "explicit"), "explicit");
+    assert.equal(deriveGoalId("loop", "Task"), "loop:task");
     assert.match(deriveGoalId("loop", "Durable Task"), /^loop:/);
   });
 
@@ -163,7 +163,7 @@ describe("cognitive-state compiler", () => {
           constraints_active: [],
           committed_action: "continue",
         },
-        success: true,
+        outcome: "success",
         output_summary: "Done",
       })],
     };
@@ -274,7 +274,7 @@ describe("cognitive-state compiler", () => {
         },
         emerged_subtasks: ["Add error handling to login"],
         subgoal_updates: [{ id: sgId, status: "done" }],
-        success: true,
+        outcome: "success",
         output_summary: "Started auth fix",
       })],
     };
@@ -307,7 +307,7 @@ describe("cognitive-state compiler", () => {
         },
         emerged_subtasks: ["Add rate limiting"],
         subgoal_updates: [{ id: sgId, status: "in_progress" }],
-        success: true,
+        outcome: "success",
         output_summary: "Started",
       })],
     };
@@ -456,20 +456,20 @@ describe("cognitive-state compiler", () => {
   it("self-eval template explains the boundary files_changed meaning", () => {
     const block = buildSelfEvalBlock(evalCtx());
     assert.ok(block.includes("files_changed"));
-    assert.ok(block.includes("net boundary change from round start"));
+    assert.ok(block.includes("net change from round start"));
     assert.ok(block.includes("including deletions"));
+    assert.ok(block.includes("gitignored paths are outside the machine boundary"));
   });
 
 
 
 
   it("forces L2 rehydration after a backtrack (recovery boundary)", () => {
-    const goalId = deriveGoalId("recovery-loop", "Recover the vault", "g1");
+    const goalId = deriveGoalId("recovery-loop", "Recover the vault");
     const request = makeLoopCompileRequest({
       loop_id: "recovery-loop",
       round: 4,
       task: "Recover the vault",
-      goal_id: goalId,
     });
     const context = {
       results: [
@@ -481,7 +481,7 @@ describe("cognitive-state compiler", () => {
             recompile_level: "l1",
             goal_id: goalId,
             constraints_active: [],
-            success: true,
+            outcome: "success",
           },
         },
         committedBacktrackRound(4, "recovery-loop", 3),
@@ -505,9 +505,9 @@ describe("cognitive-state compiler", () => {
             loop_id: "retract-loop",
             round: 1,
             recompile_level: "l1",
-            goal_id: "g",
+
             constraints_active: [constraint],
-            success: true,
+            outcome: "success",
             committed_action: "continue",
           },
           discovered_constraints: [constraint],
@@ -519,9 +519,9 @@ describe("cognitive-state compiler", () => {
             loop_id: "retract-loop",
             round: 3,
             recompile_level: "l1",
-            goal_id: "g",
+
             constraints_active: [constraint],
-            success: true,
+            outcome: "success",
             committed_action: "continue",
           },
         }),
@@ -533,7 +533,7 @@ describe("cognitive-state compiler", () => {
       loop_id: "retract-loop",
       round: 3,
       task: "Task",
-      goal_id: "g",
+
     }), context as never);
     assert.ok(!r3.constraints_active.includes(constraint),
       "retracted discovered constraint must stay out during the window");
@@ -544,7 +544,7 @@ describe("cognitive-state compiler", () => {
       loop_id: "retract-loop",
       round: 4,
       task: "Task",
-      goal_id: "g",
+
     }), context as never);
     assert.ok(r4.constraints_active.includes(constraint),
       "constraint returns after retire_window rounds");
@@ -565,12 +565,11 @@ describe("v3.2 — criterion status derivation", () => {
       results: [
         committedFeedbackRound(1, {
           loopId: "cs-test",
-          success: true,
           remaining: ["Parser complete", "Tests ≥90%"],
         }),
         committedFeedbackRound(2, {
           loopId: "cs-test",
-          success: true,
+          outcome: "success",
           met: ["Parser complete"],
           remaining: ["Tests ≥90%"],
         }),
@@ -637,7 +636,7 @@ describe("v3.8.1 — recurring flags", () => {
     agentSuccessClaim: false,
     agentOutcome: null,
     contractProposal: null,
-    contractTransition: null,
+    contractRedirect: null,
     contractBinding: null,
     beforeEvidence: [],
     afterEvidence: [],
@@ -817,7 +816,7 @@ describe("manageConstraintLifecycle — current-round violations (v3.2.1)", () =
           constraints_active: ["No plaintext passwords"],
           committed_action: "continue",
         },
-        success: false,
+        outcome: "failed",
         output_summary: "Tried without hashing",
         constraint_violations: ["No plaintext passwords"],
       })],
@@ -997,7 +996,8 @@ describe("v3.9.1 — Round Contract eval template", () => {
       activeContract: testContract(),
     }));
     assert.ok(block.includes("rci-12345678"), "renders the real rci id");
-    assert.ok(block.includes("do NOT need to restate"), "no mechanical restatement");
+    assert.ok(block.includes("Omit `round_contract` to CONTINUE"),
+      "continuing the contract needs no restatement");
     assert.ok(!block.includes("done_when"), "old contract shape is gone");
     assert.ok(!block.includes("verification_plan"), "old contract shape is gone");
   });
@@ -1017,7 +1017,7 @@ describe("v3.9.1 — Round Contract eval template", () => {
     }));
     assert.ok(!noCommand.includes("round_contract"),
       "no command → no contract proposal");
-    assert.ok(noCommand.includes("run without a contract"));
+    assert.ok(noCommand.includes("no contract is possible"));
   });
 
   it("L0 retry stays lean but keeps functional contract claims", () => {
@@ -1040,7 +1040,7 @@ describe("v3.4 — ACTIVE Round Contract derivation (compileLoop)", () => {
   beforeEach(() => resetPolicy());
   /** Merged production-shape lineage entry (shared fixture, derive-cc loop). */
   const mergedRound = (r: number, o: Parameters<typeof mergedLineageRound>[1] = {}) =>
-    mergedLineageRound(r, { loopId: "derive-cc", ...o });
+    mergedLineageRound(r, { loopId: "derive-cc", task: TASK, ...o });
   // v3.8: contracts declare ITEMS; each binds evidence commands.
   const A = {
     work_item: "Slice A",
@@ -1078,9 +1078,9 @@ describe("v3.4 — ACTIVE Round Contract derivation (compileLoop)", () => {
     assert.ok(res.prompt.includes("**Slice A**"), "active contract must be the Current Task");
     assert.ok(res.prompt.includes("a one"), "item descriptions render");
     assert.ok(res.state_file_content?.includes("**Slice A**"));
-    // L1/L2 eval template asks for the restatement (hasContract via derived
-    // active — no last_round_result needed).
-    assert.ok(res.prompt.includes("round_contract"));
+    // The evaluation block states the continuation rule from the same derived
+    // active contract (no last_round_result needed).
+    assert.ok(res.prompt.includes("Omit `round_contract` to CONTINUE"));
   });
 
   it("L0 retry keeps the contract as Current Task but stays template-lean", () => {
@@ -1117,8 +1117,6 @@ describe("v3.4 — ACTIVE Round Contract derivation (compileLoop)", () => {
       }),
     ]);
     assert.ok(!res.prompt.includes("**Slice A**"), "satisfied contract must stop rendering");
-    assert.ok(res.prompt.includes("round_contract"),
-      "the closing round may declare a successor proposal");
     assert.ok(res.prompt.includes(TASK), "objective still present");
   });
 
@@ -1228,8 +1226,9 @@ describe("L7 — state file disabled cross-knob guard", () => {
   const baselineRound1 = (loopId: string): Record<string, unknown> =>
     withTransaction({
       loop_id: loopId,
+      task: "Continue the migration",
       output_summary: "Round 1 done",
-      success: true,
+      outcome: "success",
       loop_lineage: {
         loop_id: loopId,
         round: 1,
@@ -1303,7 +1302,7 @@ describe("v3.9.2 — compact criteria guidance", () => {
     assert.doesNotMatch(response.prompt, /<criterion text or cr id from the prompt>/);
   });
 
-  it("omits criterion_claims from the compact list when no criteria exist", () => {
+  it("omits claims from the compact list when no criteria or contract exist", () => {
     const response = compileLoop(makeLoopCompileRequest({
       loop_id: "criteria-empty",
       round: 2,
@@ -1501,7 +1500,7 @@ describe("3.9.3 — committed-fact prompt level", () => {
     assert.equal(response.recompile_level, "l0");
     const prompt = response.prompt;
     for (const path of [
-      "execution_report.criterion_claims",
+      "execution_report.claims",
       "discovered_constraints",
       "wrong_assumptions",
       "open_questions",
@@ -1533,7 +1532,7 @@ describe("3.9.3 — committed-fact prompt level", () => {
           constraints_active: [],
           committed_action: "continue",
         },
-        success: false,
+        outcome: "failed",
         verification_flags: [staleFlag],
       }, "continue", noMotionEvidence())],
     };
@@ -1570,7 +1569,7 @@ describe("3.9.3 — committed-fact prompt level", () => {
           constraints_active: [],
           committed_action: "continue",
         },
-        success: false,
+        outcome: "failed",
       }, "continue", {
         beforeEvidence: [gitObservation("before", { "a.ts": "m:1" }, "aaa")],
         afterEvidence: [gitObservation("after", { "a.ts": "m:2" }, "bbb")],
@@ -1645,7 +1644,7 @@ describe("3.9.3 — committed-fact prompt level", () => {
             constraints_active: [],
             committed_action: "continue",
           },
-          success: true,
+          outcome: "success",
           loop_objective: makeLoopObjective({
             loop_id: loopId,
             objective: "ABANDONED branch",

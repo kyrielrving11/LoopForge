@@ -16,10 +16,12 @@ import { formatContextBoundaryLabel } from "./round-guidance.js";
  *  reported progress/issues/warnings, compile context and Working Memory
  *  source counts. v4.0.4: schema 8 records the renamed context vocabulary
  *  (`fresh_invocation`) in the derived declaration and stateHash. v4.0.5:
- *  schema 9 adds the optional `currentUserInstruction` projection. The state
+ *  schema 9 adds the optional `currentUserInstruction` projection; schema 10
+ *  (v4.0.6) makes the objective the WORKING objective, falls back to it for
+ *  the Current Task, and removes the Agent-reported test counts. The state
  *  file is regenerated every round; an older file is a stale view, not a
  *  legacy document to decode. */
-export const CANONICAL_STATE_SCHEMA_VERSION = 9;
+export const CANONICAL_STATE_SCHEMA_VERSION = 10;
 /** v4.0.5: the ONE wording for "the host supplied no instruction". Prompt and
  *  state file both render it; neither infers an instruction from the old task
  *  or transcript. */
@@ -267,8 +269,8 @@ statuses) {
         if (item.verify_with.length > 0) {
             lines.push(`    - Verify via: ${item.verify_with.join(", ")}`);
         }
-        if (item.criterion_refs.length > 0) {
-            lines.push(`    - Criteria: ${item.criterion_refs.join(", ")}`);
+        if ((item.criterion_refs ?? []).length > 0) {
+            lines.push(`    - Criteria: ${(item.criterion_refs ?? []).join(", ")}`);
         }
         if (machine?.reasons.length) {
             lines.push(`    - Unverified because: ${machine.reasons[0]}`);
@@ -354,7 +356,7 @@ export function renderCanonicalStateMarkdown(state, options) {
         `**Source**: round ${state.round} (attempt ${context?.attempt ?? options?.attempt ?? 1})`,
         "**Authority**: committed typed rounds are the factual source; this file is a derived view.",
         "**Round commit**: a LoopForge round commit is not a Git commit; it does not verify every workspace change.",
-        "**Evidence**: machine evidence = providers, command observations and verified contract items. Agent reports = success/outcome/tests/files/criteria claims.",
+        "**Evidence**: machine evidence = providers, command observations and verified contract items. Agent reports = outcome/files/claims.",
         "**Working memory**: bounded; it may be abbreviated; full history via replay/explain or this file when enabled.",
         `**State hash**: ${hashCanonicalState(state).slice(0, 12)}`,
         "",
@@ -427,7 +429,6 @@ function flatStateSections(state) {
     if (reported.criteriaMet.length > 0 ||
         reported.criteriaRemaining.length > 0 ||
         reported.filesChanged.length > 0 ||
-        reported.tests !== null ||
         state.machineStatus !== undefined ||
         posture !== undefined) {
         const total = reported.criteriaMet.length + reported.criteriaRemaining.length;
@@ -438,10 +439,6 @@ function flatStateSections(state) {
         if (state.criterionStatuses.length > 0) {
             const verifiedCount = state.criterionStatuses.filter((criterion) => criterion.status === "verified").length;
             lines.push(`**Machine-verified criteria**: ${verifiedCount}/${state.criterionStatuses.length}`);
-        }
-        if (reported.tests) {
-            lines.push(`**Tests (Agent report)**: ${reported.tests.passed} passed, ` +
-                `${reported.tests.failed} failed, ${reported.tests.skipped} skipped`);
         }
         if (reported.filesChanged.length > 0) {
             lines.push("", "**Agent-reported files**:");
@@ -626,11 +623,11 @@ derived) {
         ? unique(last?.resolved_open_question_ids ?? [])
             .filter(isOpenQuestionId)
         : [];
-    // v3.4: The ACTIVE Round Contract (derived — loop-compiler computes it
-    // from committed rounds) drives the Current Task — the contract IS "what
-    // to do this round"; the original objective stays in the Objective
-    // section above. No active contract → the original task text is used,
-    // byte-identical to pre-v3.3 behavior.
+    // v3.4/v4.0.6: The ACTIVE Round Contract (derived — loop-compiler computes
+    // it from committed rounds) drives the Current Task — the contract IS "what
+    // to do this round"; the working objective stays in the Objective section
+    // above. No active contract → the invocation instruction, else the WORKING
+    // objective (latest committed objective_refinement or the acceptance task).
     const roundContract = derived?.roundFacts?.activeContract ?? null;
     // v4.0.5: the host's explicit invocation input. Empty/whitespace is "not
     // provided", never a second task. Conditional presence keeps the state hash
@@ -663,7 +660,7 @@ derived) {
         objective: objective?.objective || request.task,
         currentTask: roundContract
             ? formatRoundContract(roundContract, derived?.roundFacts?.itemStatuses ?? null)
-            : currentUserInstruction ?? request.task,
+            : currentUserInstruction ?? objective?.objective ?? request.task,
         ...(currentUserInstruction ? { currentUserInstruction } : {}),
         successCriteria,
         hardConstraints,
@@ -690,7 +687,6 @@ derived) {
             criteriaRemaining: unique(claimedRemainingCriteria(executionReport)),
             agentReportedRemaining: unique(claimedRemainingCriteria(executionReport)),
             filesChanged: unique(executionReport?.files_changed ?? []),
-            tests: executionReport?.tests_reported ?? null,
         },
         ...(resolvedOpenQuestionIds.length > 0
             ? { resolvedOpenQuestionIds }

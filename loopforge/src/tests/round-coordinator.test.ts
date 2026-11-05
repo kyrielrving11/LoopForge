@@ -1,5 +1,5 @@
 /** Tests for RoundCoordinator — verify → enforce → stop pipeline. */
-import { committedFeedbackRound, criterionClaims, deltasFrom, MemoryLoopStore } from "./_helpers.js";
+import { committedFeedbackRound, criterionClaims, deltasFrom, MemoryLoopStore, itemClaims } from "./_helpers.js";
 import { deriveContractItemIds } from "../token-utils.js";
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
@@ -16,14 +16,14 @@ import type { CommandObservation } from "../protocol.js";
 
 function se(overrides: Partial<SelfEvaluation> = {}): SelfEvaluation {
   return makeSelfEvaluation({
-    success: false,
+    outcome: "failed",
     output_summary: "Fixed 3 bugs in auth module.",
     constraint_violations: [],
     should_continue: true,
     execution_report: makeExecutionReport({
       files_changed: ["auth.ts"],
-      tests_reported: { passed: 10, failed: 0, skipped: 0 },
-      criterion_claims: criterionClaims([], ["add unit tests"]),
+
+      claims: criterionClaims([], ["add unit tests"]),
     }),
     ...overrides,
   });
@@ -102,11 +102,10 @@ describe("RoundCoordinator — happy path", () => {
     // the claim must be effective and the passed command must back it.
     const result = coordinator.processRound(minimalInput({
       selfEval: se({
-        success: true,
+        outcome: "success",
         execution_report: makeExecutionReport({
           files_changed: ["auth.ts"],
-          tests_reported: { passed: 10, failed: 0, skipped: 0 },
-          criterion_claims: [],
+
         }),
       }),
     }));
@@ -132,13 +131,13 @@ describe("RoundCoordinator — stop conditions", () => {
   it("stops when should_continue=false and success=true (completed)", () => {
     const result = coordinator.processRound(minimalInput({
       selfEval: se({
-        success: true,
+        outcome: "success",
         should_continue: false,
         // Clean completion: no remaining criteria, evidence present
         execution_report: makeExecutionReport({
           files_changed: ["auth.ts"],
-          tests_reported: { passed: 10, failed: 0, skipped: 0 },
-          criterion_claims: criterionClaims([], []),
+
+          claims: criterionClaims([], []),
         }),
       }),
     }));
@@ -166,12 +165,12 @@ describe("RoundCoordinator — stop conditions", () => {
       // insufficient and the contract stays open.
       evidenceDeltas: [],
       selfEval: se({
-        success: true,
+        outcome: "success",
         should_continue: false,
         execution_report: makeExecutionReport({
           files_changed: ["src/auth/a.ts"],
-          tests_reported: { passed: 1, failed: 0, skipped: 0 },
-          contract_item_claims: [{ item_id: itemId, outcome: "met" }],
+
+          claims: itemClaims([{ item_id: itemId, outcome: "met" }]),
         }),
       }),
     }));
@@ -184,7 +183,7 @@ describe("RoundCoordinator — stop conditions", () => {
 
   it("stops when should_continue=false and success=false (failed)", () => {
     const result = coordinator.processRound(minimalInput({
-      selfEval: se({ success: false, should_continue: false }),
+      selfEval: se({ outcome: "failed", should_continue: false }),
     }));
     assert.equal(result.action, "stop");
     assert.equal(result.stopReason, "failed");
@@ -193,43 +192,36 @@ describe("RoundCoordinator — stop conditions", () => {
   it("stops with blocked reason when agent declares blocked", () => {
     const result = coordinator.processRound(minimalInput({
       selfEval: se({
-        success: false,
+        outcome: "blocked",
         should_continue: false,
-        agent_stop_reason: "blocked",
+        blocker: "missing production credentials",
       }),
     }));
     assert.equal(result.action, "stop");
     assert.equal(result.stopReason, "blocked");
   });
 
-  it("stops with blocked reason when agent needs human input", () => {
+  it("blocker text expresses a need for human input", () => {
     const result = coordinator.processRound(minimalInput({
       selfEval: se({
-        success: false,
+        outcome: "blocked",
         should_continue: false,
-        agent_stop_reason: "needs_human_input",
+        blocker: "needs human input: which database should the migration target?",
       }),
     }));
     assert.equal(result.action, "stop");
     assert.equal(result.stopReason, "blocked");
   });
 
-  it("v3.8: an explicit blocked declaration outranks a success claim", () => {
-    // `success: true` together with a declared blocked stop is a
-    // contradiction. The declared field is the honest reading — reporting
-    // `completed` would let two contradictory fields silently buy a
-    // completion verdict. The report is otherwise a clean completion, so the
-    // only thing standing between this round and `completed` is the
-    // declaration.
+  it("v4.0.6: outcome=blocked is the ONE blocked declaration and outranks a clean report", () => {
     const result = coordinator.processRound(minimalInput({
       selfEval: se({
-        success: true,
+        outcome: "blocked",
         should_continue: false,
-        agent_stop_reason: "blocked",
+        blocker: "cannot proceed",
         execution_report: makeExecutionReport({
           files_changed: ["auth.ts"],
-          tests_reported: { passed: 10, failed: 0, skipped: 0 },
-          criterion_claims: criterionClaims([], []),
+          claims: criterionClaims([], []),
         }),
       }),
     }));
@@ -258,13 +250,12 @@ describe("RoundCoordinator — stop conditions", () => {
       loopId: "blocked-closed-contract",
       currentRound: 3,
       selfEval: se({
-        success: true,
+        outcome: "blocked",
         should_continue: false,
-        agent_stop_reason: "needs_human_input",
+        blocker: "needs human input on the closed slice",
         execution_report: makeExecutionReport({
           files_changed: [],
-          tests_reported: { passed: 0, failed: 0, skipped: 0 },
-          contract_item_claims: [{ item_id: itemId, outcome: "met" }],
+          claims: itemClaims([{ item_id: itemId, outcome: "met" }]),
         }),
       }),
     }));
@@ -293,9 +284,9 @@ describe("RoundCoordinator — rejection", () => {
   it("rejects when success=true but criteria remain unmet", () => {
     const result = coordinator.processRound(minimalInput({
       selfEval: se({
-        success: true,
+        outcome: "success",
         execution_report: makeExecutionReport({
-          criterion_claims: criterionClaims([], ["unfinished criteria"]),
+          claims: criterionClaims([], ["unfinished criteria"]),
         }),
       }),
     }));
@@ -309,9 +300,9 @@ describe("RoundCoordinator — rejection", () => {
   it("increments rejection count on reject", () => {
     const result = coordinator.processRound(minimalInput({
       selfEval: se({
-        success: true,
+        outcome: "success",
         execution_report: makeExecutionReport({
-          criterion_claims: criterionClaims([], ["unfinished criteria"]),
+          claims: criterionClaims([], ["unfinished criteria"]),
         }),
       }),
       consecutiveRejections: 1,
@@ -362,9 +353,9 @@ describe("RoundCoordinator — verification flags", () => {
   it("sets gateContradicted when verdict is contradicted", () => {
     const result = coordinator.processRound(minimalInput({
       selfEval: se({
-        success: true,
+        outcome: "success",
         execution_report: makeExecutionReport({
-          criterion_claims: criterionClaims([], ["unmet criteria", "more unmet"]),
+          claims: criterionClaims([], ["unmet criteria", "more unmet"]),
         }),
       }),
     }));
@@ -383,7 +374,7 @@ describe("RoundCoordinator — extraction handling", () => {
   it("runs enforcement when extraction succeeded", () => {
     const result = coordinator.processRound(minimalInput({
       selfEval: se({
-        success: false, // no fake success
+        outcome: "failed", // no fake success
         should_continue: true,
       }),
     }));
@@ -398,15 +389,14 @@ describe("RoundCoordinator — extraction handling", () => {
 describe("round-coordinator — v2.12 outcome stop mapping", () => {
   function outcomeEval(outcome: "success" | "partial" | "failed" | "blocked") {
     return makeSelfEvaluation({
-      success: outcome === "success",
       outcome,
       output_summary: "round done",
       constraint_violations: [],
       should_continue: false,
       execution_report: {
         files_changed: ["src/a.ts"],
-        tests_reported: { passed: 1, failed: 0, skipped: 0 },
-        criterion_claims: criterionClaims([], []),
+
+        claims: criterionClaims([], []),
       },
     });
   }
@@ -431,6 +421,17 @@ describe("round-coordinator — v2.12 outcome stop mapping", () => {
     });
     assert.equal(result.action, "stop");
     assert.equal(result.stopReason, "completed");
+  });
+
+  it("maps outcome=partial + should_continue=false to incomplete", () => {
+    const result = new RoundCoordinator().processRound({
+      loopId: "x", task: "t", currentRound: 2, maxRounds: 10,
+      evidenceDeltas: deltasFrom([commandSnap()]),
+      selfEval: outcomeEval("partial"),
+      consecutiveRejections: 0,
+    });
+    assert.equal(result.action, "stop");
+    assert.equal(result.stopReason, "incomplete");
   });
 
   it("does not stop when outcome=blocked but should_continue=true", () => {
@@ -467,14 +468,14 @@ describe("v3.8.3 — finalizeStopReason", () => {
     assert.equal(result.flags[0]?.severity, "warn");
   });
 
-  it("treats agent_stop_reason blocked / needs_human_input as the same declaration", () => {
-    for (const stop of ["blocked", "needs_human_input"] as const) {
-      assert.equal(
-        finalizeStopReason("completed", se({ agent_stop_reason: stop })).reason,
-        "blocked",
-        `agent_stop_reason ${stop} must declare a block`,
-      );
-    }
+  it("treats outcome=blocked as the ONE blocked declaration", () => {
+    assert.equal(
+      finalizeStopReason("completed", se({
+        outcome: "blocked",
+        blocker: "needs a decision",
+      })).reason,
+      "blocked",
+    );
   });
 
   it("downgrades when the active contract closed on a blocked outcome", () => {

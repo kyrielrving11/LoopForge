@@ -60,7 +60,7 @@ describe("v3.9.4 — the machine finding is the next prompt's repair fact", () =
       repairContext(loopId, [
         committedFeedbackRound(1, {
           loopId,
-          success: true,
+          outcome: "success",
           verificationFlags: [flag],
         }),
       ]),
@@ -81,10 +81,10 @@ describe("v3.9.4 — the machine finding is the next prompt's repair fact", () =
       repairContext(loopId, [
         committedFeedbackRound(1, {
           loopId,
-          success: true,
+          outcome: "success",
           verificationFlags: [flag],
         }),
-        committedFeedbackRound(2, { loopId, success: true }),
+        committedFeedbackRound(2, { loopId, outcome: "success" }),
       ]),
     );
     assert.ok(!fixed.prompt.includes("unreported: [src/b.ts]"),
@@ -95,16 +95,16 @@ describe("v3.9.4 — the machine finding is the next prompt's repair fact", () =
   it("renders the finding's structured ref at L0", () => {
     const loopId = "repair-command";
     const flag: VerificationFlag = {
-      severity: "warn",
-      field: "tests_reported",
-      check: "command_evidence_mismatch",
-      detail: "Agent tests_reported don't match \"verify\" output: reported 2, command shows 1",
+      severity: "error",
+      field: "outcome",
+      check: "required_command_failed",
+      detail: "The required command \"verify\" failed (exit 1)",
       ref: "verify",
     };
     const response = compileLoop(
       request(loopId, 2),
       repairContext(loopId, [
-        committedFeedbackRound(1, { loopId, success: true, verificationFlags: [flag] }),
+        committedFeedbackRound(1, { loopId, outcome: "success", verificationFlags: [flag] }),
       ]),
     );
     assert.ok(response.prompt.includes("[ref: `verify`]"));
@@ -115,7 +115,7 @@ describe("v3.9.4 — the machine finding is the next prompt's repair fact", () =
 
   it("uses the SAME reconciliation basis as the receipt", () => {
     const selfEval = makeSelfEvaluation({
-      success: false,
+      outcome: "failed",
       output_summary: "Did some work.",
       constraint_violations: [],
       should_continue: true,

@@ -100,7 +100,7 @@ function state(overrides: Partial<CanonicalLoopState> = {}): CanonicalLoopState 
     stateFilePath: ".loopforge/state/coverage-state.md",
     reportedProgress: {
       criteriaMet: [], criteriaRemaining: [], agentReportedRemaining: [],
-      filesChanged: [], tests: null,
+      filesChanged: [],
     },
     roundContract: activeContract,
     capability: deriveConfiguredCapability(DEFAULT_POLICY),

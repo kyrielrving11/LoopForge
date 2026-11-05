@@ -123,9 +123,9 @@ export interface AdvanceResult {
      *  results that have no session (for example a missing-handle refusal). */
     loopId?: string;
     /** On a continue result this is the NEXT round being prepared; the
-     *  `agentOutcome`/`agentStopReason` fields and the receipt describe the
-     *  round that was just submitted. Use `submission_receipt.round_id` as the
-     *  authoritative identity of the submitted round. */
+     *  `agentOutcome` field and the receipt describe the round that was just
+     *  submitted. Use `submission_receipt.round_id` as the authoritative
+     *  identity of the submitted round. */
     round: number;
     /** v4.0.0: the ONE transport anchor for the held attempt. Derived from the
      *  persisted snapshot; never persisted itself. Absent on terminal results. */
@@ -158,12 +158,8 @@ export interface AdvanceResult {
     contextMode?: PromptContextMode;
     contextReason?: PromptContextReason;
     agentSuccessClaim?: boolean;
-    /** v4.0.3: the effective Agent-declared outcome of the round this result
-     *  is about. */
+    /** v4.0.6: the Agent-declared outcome of the round this result is about. */
     agentOutcome?: RoundOutcome | null;
-    /** v4.0.4: the Agent's declared stop reason of the round this result is
-     *  about (an Agent report, never a loop terminal reason). */
-    agentStopReason?: "gave_up" | "blocked" | "needs_human_input";
     /** v4.0.4: the Agent's declared should_continue of the same round. */
     agentShouldContinue?: boolean;
     warnings?: string[];

@@ -54,7 +54,7 @@ function minimalState(workingMemory?: WorkingMemory) {
   const response = makeLoopCompileResponse({
     loop_id: "memory-loop",
     round: 6,
-    goal_id: "memory-loop:continue",
+
     loop_objective: {
       objective: "Continue",
       success_criteria: [],
@@ -598,7 +598,7 @@ describe("open_questions — report-only normalization", () => {
   it("caps at 3 entries × 300 chars and diagnoses the loss", () => {
     const long = "x".repeat(400);
     const normalized = normalizeSelfEvaluation({
-      success: true,
+      outcome: "partial",
       output_summary: "done",
       constraint_violations: [],
       should_continue: true,
@@ -614,7 +614,7 @@ describe("open_questions — report-only normalization", () => {
 
   it("keeps an empty array valid", () => {
     const normalized = normalizeSelfEvaluation({
-      success: true,
+      outcome: "partial",
       output_summary: "done",
       constraint_violations: [],
       should_continue: true,
@@ -626,7 +626,7 @@ describe("open_questions — report-only normalization", () => {
 
   it("never enters the verification gate", () => {
     const base = makeSelfEvaluation({
-      success: false,
+      outcome: "failed",
       output_summary: "made progress",
       constraint_violations: [],
       should_continue: true,

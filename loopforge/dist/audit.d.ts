@@ -20,6 +20,15 @@ export interface AuditRound {
     /** v4.0.3: Agent claim; never a machine verdict. */
     agentSuccessClaim: boolean;
     agentOutcome: string;
+    /** v4.0.6: the Agent's blocker text, verbatim (report only). */
+    blocker: string | null;
+    /** v4.0.6: the Agent's committed working-objective refinement, if any. */
+    objectiveRefinement: string | null;
+    /** v4.0.6: the committed redirect derived from the proposal's `supersedes`. */
+    contractRedirect: {
+        contract_id: string;
+        reason?: string;
+    } | null;
     machineBackedSuccess: boolean;
     evidencePosture: EvidencePosture | null;
     claims: Array<{

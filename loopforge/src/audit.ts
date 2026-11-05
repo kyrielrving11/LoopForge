@@ -48,6 +48,12 @@ export interface AuditRound {
   /** v4.0.3: Agent claim; never a machine verdict. */
   agentSuccessClaim: boolean;
   agentOutcome: string;
+  /** v4.0.6: the Agent's blocker text, verbatim (report only). */
+  blocker: string | null;
+  /** v4.0.6: the Agent's committed working-objective refinement, if any. */
+  objectiveRefinement: string | null;
+  /** v4.0.6: the committed redirect derived from the proposal's `supersedes`. */
+  contractRedirect: { contract_id: string; reason?: string } | null;
   machineBackedSuccess: boolean;
   evidencePosture: EvidencePosture | null;
   claims: Array<{ text: string; status: "verified" | "unverified" }>;
@@ -217,16 +223,26 @@ export function buildAudit(
       round,
       agentSuccessClaim: view.agentSuccessClaim,
       agentOutcome: view.agentOutcome ?? "unknown",
+      blocker: view.evaluation?.blocker ?? null,
+      objectiveRefinement: view.objectiveRefinement ?? null,
+      contractRedirect: view.contractRedirect
+        ? {
+            contract_id: view.contractRedirect.contract_id,
+            ...(view.contractRedirect.reason !== undefined
+              ? { reason: view.contractRedirect.reason }
+              : {}),
+          }
+        : null,
       machineBackedSuccess: view.evidencePosture?.machineBackedSuccess ?? false,
       evidencePosture: view.evidencePosture,
-      claims: (view.executionReport?.criterion_claims ?? [])
-        .filter((claim) => claim.outcome === "met")
+      claims: (view.executionReport?.claims ?? [])
+        .filter((claim) => claim.id.startsWith("cr-") && claim.outcome === "met")
         .map((claim) => {
-          const id = isCriterionId(claim.criterion_id)
-            ? claim.criterion_id
-            : deriveCriterionId(claim.criterion_id);
+          const id = isCriterionId(claim.id)
+            ? claim.id
+            : deriveCriterionId(claim.id);
           return {
-            text: claim.criterion_id,
+            text: claim.id,
             status: verifiedIds.has(id)
               ? "verified" as const
               : "unverified" as const,

@@ -21,12 +21,13 @@ describe("parseExecutionReport", () => {
   it("parses valid execution evidence", () => {
     const result = parseExecutionReport({
       files_changed: ["a.ts", "b.ts"],
-      tests_reported: { passed: 8, failed: 1, skipped: 2 },
-      criterion_claims: criterionClaims(["reentrancy fixed"], ["access control"]),
+
+      claims: criterionClaims(["reentrancy fixed"], ["access control"]),
     });
     assert.ok(result);
     assert.deepEqual(result!.files_changed, ["a.ts", "b.ts"]);
-    assert.equal(result!.tests_reported!.passed, 8);
+    assert.deepEqual(result!.claims, criterionClaims(
+      ["reentrancy fixed"], ["access control"]));
     assert.equal("progress_estimate" in result!, false);
   });
 
@@ -43,9 +44,9 @@ describe("parseExecutionReport", () => {
     assert.equal("progress_estimate" in result!, false);
   });
 
-  it("defaults missing tests_reported to null", () => {
+  it("defaults missing claims to an empty array", () => {
     const result = parseExecutionReport({});
-    assert.equal(result!.tests_reported, null);
+    assert.deepEqual(result!.claims, []);
   });
 
   it("filters non-string from files_changed", () => {
@@ -63,7 +64,7 @@ describe("parseExecutionReport", () => {
 describe("buildSelfEvaluation", () => {
   it("builds from a complete raw object", () => {
     const raw: Record<string, unknown> = {
-      success: true,
+      outcome: "partial",
       output_summary: "Fixed 3 bugs",
       constraint_violations: [],
       should_continue: true,
@@ -71,13 +72,13 @@ describe("buildSelfEvaluation", () => {
       emerged_subtasks: ["audit timelock"],
       execution_report: {
         files_changed: ["token.sol"],
-        tests_reported: { passed: 10, failed: 0, skipped: 0 },
-        criterion_claims: criterionClaims(["no reentrancy"], []),
+
+        claims: criterionClaims(["no reentrancy"], []),
       },
       subgoal_updates: [{ id: "sg-aabbccdd", status: "done", note: "ship it" }],
     };
     const result = buildSelfEvaluation(raw);
-    assert.equal(result.success, true);
+    assert.equal(result.outcome, "partial");
     assert.equal(result.output_summary, "Fixed 3 bugs");
     assert.deepEqual(result.discovered_constraints, ["use SafeERC20"]);
     assert.deepEqual(result.emerged_subtasks, ["audit timelock"]);
@@ -88,53 +89,56 @@ describe("buildSelfEvaluation", () => {
 
   it("uses sensible defaults for missing fields", () => {
     const result = buildSelfEvaluation({
-      success: false,
+      outcome: "failed",
       output_summary: "",
       constraint_violations: [],
       should_continue: true,
     });
-    assert.equal(result.success, false);
+    assert.equal(result.outcome, "failed");
     assert.deepEqual(result.discovered_constraints, []);
   });
 
-  it("handles non-boolean success gracefully", () => {
+  it("defaults a missing outcome to failed, never success", () => {
     const result = buildSelfEvaluation({
       output_summary: "done",
       constraint_violations: [],
       should_continue: false,
     });
-    assert.equal(result.success, false);
+    assert.equal(result.outcome, "failed");
   });
 
   it("handles non-string output_summary gracefully", () => {
     const result = buildSelfEvaluation({
-      success: true,
       constraint_violations: [],
       should_continue: true,
     });
     assert.equal(result.output_summary, "");
   });
 
-  it("parses valid agent_stop_reason", () => {
+  it("parses a valid objective_refinement", () => {
     const result = buildSelfEvaluation({
-      success: false,
+      outcome: "failed",
       output_summary: "done",
       constraint_violations: [],
       should_continue: false,
-      agent_stop_reason: "blocked",
+      objective_refinement: "  the overall objective now covers migration  ",
     });
-    assert.equal(result.agent_stop_reason, "blocked");
+    assert.equal(result.objective_refinement, "the overall objective now covers migration");
   });
 
-  it("ignores invalid agent_stop_reason values", () => {
-    const result = buildSelfEvaluation({
-      success: false,
+  it("drops a non-blocked blocker instead of rejecting the round", () => {
+    const result = normalizeSelfEvaluation({
+      outcome: "failed",
       output_summary: "done",
       constraint_violations: [],
       should_continue: false,
-      agent_stop_reason: "invalid_value",
+      blocker: "not blocked",
     });
-    assert.equal(result.agent_stop_reason, undefined);
+    assert.equal(result.evaluation.blocker, undefined);
+    assert.ok(result.diagnostics.some((diagnostic) =>
+      diagnostic.path === "blocker" &&
+      diagnostic.code === "not_applicable" &&
+      diagnostic.handling === "dropped"));
   });
 
 });
@@ -145,28 +149,30 @@ describe("buildSelfEvaluation", () => {
 
 describe("v2.12 outcome parsing", () => {
   it("preserves a valid declared outcome", () => {
-    const eval_ = buildSelfEvaluation({ success: true, outcome: "partial" });
+    const eval_ = buildSelfEvaluation({ outcome: "partial" });
     assert.equal(eval_.outcome, "partial");
   });
 
-  it("falls back to derivation on an invalid outcome value", () => {
-    const eval_ = buildSelfEvaluation({ success: true, outcome: "completed" });
-    assert.equal(eval_.outcome, undefined);
-    assert.equal(effectiveOutcome(eval_), "success");
+  it("falls back to failed on an invalid outcome value", () => {
+    const eval_ = buildSelfEvaluation({ outcome: "completed" });
+    assert.equal(eval_.outcome, "failed");
+    assert.equal(effectiveOutcome(eval_), "failed");
   });
 
-  it("derives success/failed from the boolean when outcome is absent", () => {
-    assert.equal(effectiveOutcome(buildSelfEvaluation({ success: true })), "success");
-    assert.equal(effectiveOutcome(buildSelfEvaluation({ success: false })), "failed");
-  });
-
-  it("never silently derives partial from success=false", () => {
-    assert.equal(effectiveOutcome(buildSelfEvaluation({ success: false })), "failed");
+  it("keeps a valid declared outcome", () => {
+    assert.equal(effectiveOutcome(buildSelfEvaluation({ outcome: "success" })), "success");
+    assert.equal(effectiveOutcome(buildSelfEvaluation({ outcome: "failed" })), "failed");
   });
 
   it("trims empty blocker to undefined", () => {
-    assert.equal(buildSelfEvaluation({ blocker: "   " }).blocker, undefined);
-    assert.equal(buildSelfEvaluation({ blocker: "waiting on CI" }).blocker, "waiting on CI");
+    assert.equal(
+      buildSelfEvaluation({ outcome: "blocked", blocker: "   " }).blocker,
+      undefined,
+    );
+    assert.equal(
+      buildSelfEvaluation({ outcome: "blocked", blocker: "waiting on CI" }).blocker,
+      "waiting on CI",
+    );
   });
 
   it("filters retroactive claims (bad round / empty claim / cap 20)", () => {
@@ -195,7 +201,7 @@ describe("core evaluation validation", () => {
       outcome: 42, // wrong type
     });
     assert.deepEqual(validation.missing, []);
-    assert.deepEqual(validation.invalid.map((g) => g.field).sort(), ["constraint_violations", "success"]);
+    assert.deepEqual(validation.invalid.map((g) => g.field).sort(), ["constraint_violations", "outcome"]);
   });
 });
 
@@ -250,7 +256,7 @@ describe("v3.3 — round_contract parsing", () => {
 
   it("buildSelfEvaluation carries round_contract through and defaults absent", () => {
     const withContract = buildSelfEvaluation({
-      success: false,
+      outcome: "failed",
       output_summary: "x",
       constraint_violations: [],
       should_continue: true,
@@ -263,7 +269,7 @@ describe("v3.3 — round_contract parsing", () => {
     assert.equal(withContract.round_contract?.work_item, "auth");
     assert.equal(withContract.round_contract?.items[0].description, "done");
     const without = buildSelfEvaluation({
-      success: false,
+      outcome: "failed",
       output_summary: "x",
       constraint_violations: [],
       should_continue: true,
@@ -275,7 +281,7 @@ describe("v3.3 — round_contract parsing", () => {
 describe("v3.7.1 — worker_results parsing (outcome is the single fact)", () => {
   function build(worker_results: unknown) {
     return buildSelfEvaluation({
-      success: false,
+      outcome: "failed",
       output_summary: "x",
       constraint_violations: [],
       should_continue: true,
@@ -353,8 +359,8 @@ describe("validateContractShape", () => {
     raw: Record<string, unknown>,
     overrides: Partial<ContractValidationContext> = {},
   ) => validateContractShape(raw, context(overrides));
-  const claim = (item_id: string, outcome = "met") => ({
-    execution_report: { contract_item_claims: [{ item_id, outcome }] },
+  const claim = (id: string, outcome = "met") => ({
+    execution_report: { claims: [{ id, outcome }] },
   });
   const item = (overrides: Record<string, unknown> = {}) => ({
     description: "works", criterion_refs: [], verify_with: ["verify"], ...overrides,
@@ -507,12 +513,12 @@ describe("validateContractShape", () => {
   });
 
   it("rejects malformed item ids, duplicates, and unknown active items", () => {
-    const malformed = check(claim("nope"));
+    const malformed = check(claim("rci-nope"));
     assert.equal(malformed[0]?.reason, "invalid_item_id");
     const duplicate = check({
-      execution_report: { contract_item_claims: [
-        { item_id: "rci-11111111", outcome: "met" },
-        { item_id: "rci-11111111", outcome: "remaining" },
+      execution_report: { claims: [
+        { id: "rci-11111111", outcome: "met" },
+        { id: "rci-11111111", outcome: "remaining" },
       ] },
     });
     assert.equal(duplicate[0]?.reason, "duplicate_item_id");
@@ -538,7 +544,7 @@ describe("validateContractShape", () => {
 
 describe("v3.9.1 — normalization diagnostics", () => {
   const base = {
-    success: true,
+    outcome: "success",
     output_summary: "done",
     constraint_violations: [],
     should_continue: false,
@@ -564,21 +570,37 @@ describe("v3.9.1 — normalization diagnostics", () => {
     assert.ok(!result.submittedFields.includes("progress_estimate"));
   });
 
-  it("v4.0.1: diagnoses the removed prompt channels", () => {
+  it("v4.0.6: diagnoses the retired success and agent_stop_reason fields", () => {
+    const result = normalizeSelfEvaluation({
+      ...base,
+      success: true,
+      agent_stop_reason: "blocked",
+    });
+    assert.equal("success" in result.evaluation, false);
+    assert.equal("agent_stop_reason" in result.evaluation, false);
+    const byPath = new Map(
+      result.diagnostics.map((item) => [item.path, item.detail]),
+    );
+    assert.match(byPath.get("success") ?? "", /removed in 4\.0\.6/);
+    assert.match(byPath.get("agent_stop_reason") ?? "", /removed in 4\.0\.6/);
+    assert.ok(!result.submittedFields.includes("success"));
+    assert.ok(!result.submittedFields.includes("agent_stop_reason"));
+  });
+
+  it("v4.0.1: diagnoses removed prompt channels while accepting objective_refinement", () => {
     const result = normalizeSelfEvaluation({
       ...base,
       prompt_requests: { emphasize: ["x"] },
       objective_refinement: "a newer understanding",
     });
     assert.equal("prompt_requests" in result.evaluation, false);
-    assert.equal("objective_refinement" in result.evaluation, false);
+    assert.equal(result.evaluation.objective_refinement, "a newer understanding");
     assert.ok(!result.submittedFields.includes("prompt_requests"));
-    assert.ok(!result.submittedFields.includes("objective_refinement"));
+    assert.ok(result.submittedFields.includes("objective_refinement"));
     const details = new Map(
       result.diagnostics.map((item) => [item.path, item.detail]),
     );
     assert.match(details.get("prompt_requests") ?? "", /removed in 4\.0\.1/);
-    assert.match(details.get("objective_refinement") ?? "", /removed in 4\.0\.1/);
   });
 
   it("diagnoses wrong types, caps, truncation and invalid enums", () => {
@@ -591,7 +613,7 @@ describe("v3.9.1 — normalization diagnostics", () => {
       outcome: "maybe",
       execution_report: {
         files_changed: "not an array",
-        tests_reported: { passed: "many", failed: -1 },
+        claims: "not an array",
         unknown_report_key: true,
       },
       worker_results: [
@@ -606,7 +628,7 @@ describe("v3.9.1 — normalization diagnostics", () => {
     assert.equal(byPath.get("wrong_assumptions")?.code, "truncated");
     assert.equal(byPath.get("outcome")?.code, "invalid_enum");
     assert.equal(byPath.get("execution_report.files_changed")?.code, "not_array");
-    assert.equal(byPath.get("execution_report.tests_reported")?.code, "invalid_value");
+    assert.equal(byPath.get("execution_report.claims")?.code, "not_array");
     assert.equal(byPath.get("execution_report.unknown_report_key")?.code, "unknown_field");
     assert.equal(byPath.get("worker_results")?.code, "invalid_entry");
   });
@@ -617,7 +639,7 @@ describe("v3.9.1 — normalization diagnostics", () => {
       discovered_constraints: ["no prod"],
       execution_report: {
         files_changed: ["src/a.ts"],
-        tests_reported: { passed: 1, failed: 0, skipped: 0 },
+
       },
     };
     const a = normalizeSelfEvaluation(raw);
@@ -642,73 +664,72 @@ describe("v3.9.1 — normalization diagnostics", () => {
 
 describe("v3.9.2 — criterion claim reference filtering", () => {
   const core = {
-    success: false,
+    outcome: "failed",
     output_summary: "made progress",
     constraint_violations: [],
     should_continue: true,
   };
   const known = { id: "cr-12345678", text: "All tests pass" };
-  const payload = (claims: Array<{ criterion_id: string; outcome: string }>) => ({
+  const payload = (claims: Array<{ id: string; outcome: string }>) => ({
     ...core,
-    execution_report: { criterion_claims: claims },
+    execution_report: { claims },
   });
 
   it("drops an unknown reference with an all-entries diagnostic", () => {
     const result = normalizeSelfEvaluation(
-      payload([{ criterion_id: "cr-deadbeef", outcome: "met" }]),
+      payload([{ id: "cr-deadbeef", outcome: "met" }]),
       { knownCriterionRefs: [known] },
     );
-    assert.deepEqual(result.evaluation.execution_report?.criterion_claims, []);
+    assert.deepEqual(result.evaluation.execution_report?.claims, []);
     assert.ok(result.diagnostics.some((diagnostic) =>
-      diagnostic.path === "execution_report.criterion_claims" &&
+      diagnostic.path === "execution_report.claims" &&
       diagnostic.code === "all_entries_dropped" &&
       diagnostic.handling === "dropped"));
   });
 
-  it("keeps a real id and an exact criterion text", () => {
+  it("keeps a real cr- id", () => {
     const result = normalizeSelfEvaluation(
-      payload([
-        { criterion_id: "cr-12345678", outcome: "met" },
-        { criterion_id: "All tests pass", outcome: "remaining" },
-      ]),
+      payload([{ id: "cr-12345678", outcome: "met" }]),
       { knownCriterionRefs: [known] },
     );
-    assert.equal(result.evaluation.execution_report?.criterion_claims?.length, 2);
+    assert.deepEqual(result.evaluation.execution_report?.claims, [
+      { id: "cr-12345678", outcome: "met" },
+    ]);
     assert.deepEqual(result.diagnostics, []);
   });
 
   it("drops only the unknown part of a mixed payload", () => {
     const result = normalizeSelfEvaluation(
       payload([
-        { criterion_id: "cr-12345678", outcome: "met" },
-        { criterion_id: "cr-deadbeef", outcome: "remaining" },
+        { id: "cr-12345678", outcome: "met" },
+        { id: "cr-deadbeef", outcome: "remaining" },
       ]),
       { knownCriterionRefs: [known] },
     );
-    assert.deepEqual(result.evaluation.execution_report?.criterion_claims, [
-      { criterion_id: "cr-12345678", outcome: "met" },
+    assert.deepEqual(result.evaluation.execution_report?.claims, [
+      { id: "cr-12345678", outcome: "met" },
     ]);
     assert.ok(result.diagnostics.some((diagnostic) =>
-      diagnostic.path === "execution_report.criterion_claims" &&
+      diagnostic.path === "execution_report.claims" &&
       diagnostic.code === "unknown_id" &&
       diagnostic.handling === "dropped"));
   });
 
   it("fails open when the reference space is unobservable", () => {
     const result = normalizeSelfEvaluation(
-      payload([{ criterion_id: "cr-deadbeef", outcome: "met" }]),
+      payload([{ id: "cr-deadbeef", outcome: "met" }]),
       { knownCriterionRefs: null },
     );
-    assert.equal(result.evaluation.execution_report?.criterion_claims?.length, 1);
+    assert.equal(result.evaluation.execution_report?.claims?.length, 1);
     assert.deepEqual(result.diagnostics, []);
   });
 
   it("drops every claim when the reference space is observed and empty", () => {
     const result = normalizeSelfEvaluation(
-      payload([{ criterion_id: "cr-12345678", outcome: "met" }]),
+      payload([{ id: "cr-12345678", outcome: "met" }]),
       { knownCriterionRefs: [] },
     );
-    assert.deepEqual(result.evaluation.execution_report?.criterion_claims, []);
+    assert.deepEqual(result.evaluation.execution_report?.claims, []);
     assert.ok(result.diagnostics.some((diagnostic) =>
       diagnostic.code === "all_entries_dropped"));
   });

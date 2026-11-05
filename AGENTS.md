@@ -20,8 +20,10 @@ boundary. Do not grow this file with behavior that a test can state instead.
   automatic memory discovery, PromptCraft vault writes, Markdown lineage
   fallback, `LoopProjection`/todo/handoff, automatic phase milestones,
   external-context injection, Agent revision/retraction of operator
-  acceptance, `prompt_requests`, `objective_refinement`, custom progress
-  snapshots/selectors, the delegation journal, or contract `subgoal_refs`.
+  acceptance, `prompt_requests`, custom progress snapshots/selectors, the
+  delegation journal, or contract `subgoal_refs`. `objective_refinement` is a
+  supported field again in 4.0.6: it evolves only the WORKING objective text
+  and never the operator acceptance, criteria or hard constraints.
 
 ## Boundaries
 
@@ -43,10 +45,12 @@ content hash. Never reintroduce similarity matching or fuzzy identity.
 
 ### 3. Agent reports are claims, never machine evidence
 
-`SelfEvaluation.success`/`outcome`, `execution_report`, `output_summary`,
-`open_questions`, `worker_results`, `retroactiveClaims` and `no_change_reason`
-are Agent claims. A read surface names them `agentSuccessClaim`/`agentOutcome`
-or labels them as reports; it never displays them as machine evidence.
+`SelfEvaluation.outcome`, `execution_report` (including its one `claims`
+channel), `output_summary`, `open_questions`, `worker_results`,
+`retroactiveClaims` and `no_change_reason` are Agent claims. A read surface
+names them `agentSuccessClaim`/`agentOutcome` or labels them as reports; it
+never displays them as machine evidence. There is no Agent-reported test
+count: command observations are the test fact (`tests_reported` was removed).
 
 `machineBackedSuccess` has exactly ONE definition and ONE source: the
 verification gate's `VerificationResult`, derived from an effective success
@@ -92,6 +96,15 @@ closes it; closure priority is `blocked > superseded > verified > open`.
 Operator criteria and hard constraints are immutable; the Agent may retract only
 an active Agent-discovered constraint.
 
+With at least one enabled after-capable command, a round that continues must
+leave an active contract for the next round: omit the proposal to continue the
+current contract, or declare the next slice. A different proposal while the
+active contract is open is rejected as `contract_premature` unless it carries
+`round_contract.supersedes` targeting the active `rc-` id; a successor for a
+closed contract must change the acceptance items. Stopping or blocked rounds
+cannot leave a proposal. `scope` and `supersedes` are report-only and never
+participate in `rc-` identity.
+
 ### 7. The prompt is a current-governance projection
 
 It carries committed current-governance facts, compact Machine Evidence, and a
@@ -129,8 +142,9 @@ source of truth.
 
 The current user instruction is invocation input, not loop identity: it
 projects into one prompt/artifact and never rewrites `session.task`,
-`OperatorAcceptance`, the objective, criteria, hard constraints, contract or
-goalId. A changed objective or acceptance requires a new loop.
+`OperatorAcceptance`, criteria, hard constraints, contract or goalId. The
+working objective text may evolve only through a committed
+`objective_refinement`; changing Operator Acceptance requires a new loop.
 
 Every prompt carries a derived context boundary in its artifact and a strategy
 label in its header. Prompt density and context boundary are independent.

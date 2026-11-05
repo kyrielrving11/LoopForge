@@ -22,7 +22,7 @@
 
 import type {
   ContractItemProposal,
-  ContractTransition,
+  ContractSupersede,
   ExecutionReport,
   RoundContractProposal,
 } from "./protocol.js";
@@ -79,7 +79,7 @@ export function activateContract(
     scope: [...(proposal.scope ?? [])],
     items: proposal.items.map((item, index) => ({
       description: item.description,
-      criterion_refs: [...item.criterion_refs],
+      criterion_refs: [...(item.criterion_refs ?? [])],
       verify_with: [...item.verify_with],
       id: itemIds[index],
     })),
@@ -97,24 +97,25 @@ export function sameContract(
   return canonicalContractText(left) === canonicalContractText(right);
 }
 
-/** v3.9.9: the ONE current-round fact bundle for contract derivations. Every
- *  caller passes report/deltas/blocked/transition together, so a consumer can
- *  no longer forget `agent_stop_reason: "blocked"` or the transition while another
- *  consumer sees them. */
+/** v3.9.9 / v4.0.6: the ONE current-round fact bundle for contract
+ *  derivations. Every caller passes report/deltas/blocked/redirect together,
+ *  so a consumer can no longer forget the round's blocked declaration or its
+ *  explicit redirect while another consumer sees them. */
 export interface CurrentRoundFacts {
   report: ExecutionReport | null;
   deltas: ReadonlyArray<ObservationDelta>;
-  /** The round's ONE blocked declaration (outcome OR agent_stop_reason). */
+  /** The round's ONE blocked declaration (`outcome: "blocked"`). */
   blocked: boolean;
-  /** The round's explicit contract redirect, if it declared one. */
-  transition: ContractTransition | null;
+  /** The round's explicit contract redirect, if it declared one
+   *  (`round_contract.supersedes`). */
+  redirect: ContractSupersede | null;
 }
 
 export const NO_CURRENT_ROUND_FACTS: CurrentRoundFacts = {
   report: null,
   deltas: [],
   blocked: false,
-  transition: null,
+  redirect: null,
 };
 
 /** Read a committed view's current-round facts. Read views (audit/explain/
@@ -127,13 +128,15 @@ export function committedRoundFacts(view: CommittedRoundView): CurrentRoundFacts
     blocked: view.evaluation
       ? declaresBlocked(view.evaluation)
       : view.agentOutcome === "blocked",
-    transition: view.contractTransition,
+    redirect: view.contractRedirect,
   };
 }
 
-/** The successor's acceptance CONTENT must actually change. A new work_item
- *  or scope label alone is not a new slice. */
-function acceptanceItemsDiffer(
+/** v4.0.6: The successor's acceptance CONTENT must actually change. A new
+ *  work_item or scope label alone is not a new slice. Exported because the
+ *  verification gate's `contract_successor_unchanged` check uses the SAME
+ *  content identity. */
+export function acceptanceItemsDiffer(
   proposal: RoundContractProposal,
   active: ActiveContractView,
 ): boolean {
@@ -177,7 +180,7 @@ export function deriveActiveRoundContract(
       currentBlocked: round.evaluation
         ? declaresBlocked(round.evaluation)
         : round.agentOutcome === "blocked",
-      currentTransition: round.contractTransition,
+      currentRedirect: round.contractRedirect,
       commands,
     });
     if (statuses.closure === "blocked" || statuses.closure === "verified") {
@@ -231,7 +234,7 @@ export function deriveRoundContractView(input: {
       currentReport: input.current.report,
       currentDeltas: input.current.deltas,
       currentBlocked: input.current.blocked,
-      currentTransition: input.current.transition,
+      currentRedirect: input.current.redirect,
       commands: input.commands,
     }),
   };

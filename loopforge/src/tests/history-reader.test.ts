@@ -19,14 +19,15 @@ import {
   committedFeedbackRound,
   MemoryLoopStore,
 } from "./_helpers.js";
+import { PROMPT_ARTIFACT_SCHEMA_VERSION } from "../protocol.js";
 
 const CHILD_BRANCH = "tx-rollback-hist-2";
 
 function sampleEntries(): VaultEntry[] {
   return [
-    committedFeedbackRound(1, { loopId: "hist", success: true }),
+    committedFeedbackRound(1, { loopId: "hist", outcome: "success" }),
     committedBacktrackRound(2, "hist", 1),
-    committedFeedbackRound(3, { loopId: "hist", branchId: CHILD_BRANCH, success: false }),
+    committedFeedbackRound(3, { loopId: "hist", branchId: CHILD_BRANCH, outcome: "failed" }),
   ];
 }
 
@@ -83,7 +84,7 @@ describe("committed history reader", () => {
       .round_transaction as Record<string, unknown>;
     const snapshot = transaction.snapshot as Record<string, unknown>;
     snapshot.promptArtifact = {
-      schemaVersion: 11,
+      schemaVersion: PROMPT_ARTIFACT_SCHEMA_VERSION,
       roundId: "loop:hist:round:1",
       round: 1,
       attempt: 2,
@@ -104,7 +105,11 @@ describe("committed history reader", () => {
     const history = buildCommittedHistory([invalid]);
     assert.equal(history.rounds.some((view) => view.round === 1), false);
     assert.deepEqual(history.legacyRounds, [
-      { round: 1, schemaVersion: 11, envelope: "prompt_context" },
+      {
+        round: 1,
+        schemaVersion: PROMPT_ARTIFACT_SCHEMA_VERSION,
+        envelope: "prompt_context",
+      },
     ]);
   });
 

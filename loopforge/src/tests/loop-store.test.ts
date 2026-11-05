@@ -117,12 +117,12 @@ describe("FileLoopStore", () => {
             },
           },
         ),
-        success: true,
+        outcome: "success",
       });
 
       assert.equal(store.readSession(loopId)?.entry.task_type, "session_state");
       const round = store.readRound(loopId, 1);
-      assert.equal(round?.feedback?.success, true);
+      assert.equal(round?.feedback?.outcome, "success");
       assert.equal(round?.transaction?.phase, "committed");
       assert.equal(round?.promptArtifact?.renderedPrompt, "prompt");
       // v3.9.1: the transaction lives ONCE, in the feedback entry. The round

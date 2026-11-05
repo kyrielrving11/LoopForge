@@ -23,14 +23,14 @@ function evalWithCriteria(
   overrides: Partial<SelfEvaluation> = {},
 ): SelfEvaluation {
   return makeSelfEvaluation({
-    success: true,
+    outcome: "success",
     output_summary: "done",
     constraint_violations: [],
     should_continue: false,
     execution_report: makeExecutionReport({
       files_changed: ["src/a.ts"],
-      tests_reported: { passed: 1, failed: 0, skipped: 0 },
-      criterion_claims: criterionClaims(["tests pass"], []),
+
+      claims: criterionClaims(["tests pass"], []),
     }),
     ...overrides,
   });
@@ -44,8 +44,8 @@ describe("deriveClaimView — machine-verified ids only", () => {
     const selfEval = evalWithCriteria({
       execution_report: makeExecutionReport({
         files_changed: ["src/a.ts"],
-        tests_reported: null,
-        criterion_claims: criterionClaims(["tests pass"], []),
+
+        claims: criterionClaims(["tests pass"], []),
       }),
     });
     const view = deriveClaimView(selfEval, new Set());
@@ -65,12 +65,12 @@ describe("deriveClaimView — machine-verified ids only", () => {
     assert.equal(view.claims[0].ref, `criterion:${deriveCriterionId("tests pass")}`);
   });
 
-  it("does NOT upgrade from self-reported tests plus a passed command", () => {
-    // v4.0.3: tests_reported and a passing command are not a criterion fact.
+  it("does NOT upgrade from a claim alone", () => {
+    // Only a machine-verified criterion id can upgrade an Agent claim.
     const selfEval = evalWithCriteria();
     const view = deriveClaimView(selfEval, new Set());
     assert.equal(view.verifiedCount, 0,
-      "Agent-reported test counts never upgrade a claim");
+      "Agent claims never upgrade themselves");
     assert.equal(view.claims[0].status, "claimed");
   });
 
@@ -190,7 +190,7 @@ describe("resolveRoundFiles", () => {
             constraintsRetired: [],
           },
           submittedFields: [
-            "success", "output_summary", "constraint_violations", "should_continue",
+            "outcome", "output_summary", "constraint_violations", "should_continue",
           ],
           createdAt: Date.now(),
           updatedAt: Date.now(),
@@ -198,6 +198,8 @@ describe("resolveRoundFiles", () => {
         result: {
           action: "continue",
           verificationFlags: [],
+          agentSuccessClaim: false,
+          agentOutcome: "failed",
           evidencePosture: fixtureEvidencePosture(1),
         },
       },
@@ -263,6 +265,8 @@ describe("resolveRoundFiles", () => {
           result: {
           action: "continue",
           verificationFlags: [],
+          agentSuccessClaim: false,
+          agentOutcome: "failed",
           evidencePosture: fixtureEvidencePosture(1),
         },
         },

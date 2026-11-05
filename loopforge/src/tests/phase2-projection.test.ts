@@ -10,6 +10,7 @@
 
 import { afterEach, describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { deriveCriterionId } from "../token-utils.js";
 
 import { compileLoop } from "../loop-compiler.js";
 import {
@@ -277,7 +278,7 @@ describe("v4.0.3 — state file recovery surface", () => {
     const response = makeLoopCompileResponse({
       loop_id: "state-surface",
       round: 3,
-      goal_id: "goal",
+
       loop_objective: makeLoopObjective({
         objective: "Ship auth",
         success_criteria: ["all tests pass", "no regressions", "lint clean"],
@@ -311,8 +312,8 @@ describe("v4.0.3 — state file recovery surface", () => {
       blocker: "blocked by missing credential",
       execution_report: {
         files_changed: ["src/a.ts"],
-        tests_reported: { passed: 1, failed: 1, skipped: 0 },
-        criterion_claims: [{ criterion_id: "lint clean", outcome: "remaining" }],
+
+        claims: [{ id: deriveCriterionId("lint clean"), outcome: "remaining" }],
       },
     });
     const workingMemory: WorkingMemory = {
@@ -372,7 +373,7 @@ describe("v4.0.3 — state file recovery surface", () => {
     assert.match(md, /\*\*Agent-reported criteria\*\*: 0\/1/);
     assert.match(md, /\*\*Machine-verified criteria\*\*: 1\/3/,
       "claimed criteria never count as machine-verified");
-    assert.match(md, /\*\*Tests \(Agent report\)\*\*: 1 passed, 1 failed/);
+    assert.match(md, /\*\*Agent-reported files\*\*/);
     assert.match(md, /\*\*Observed changes \(last committed round\)\*\*: 2/);
     assert.match(md, /\*\*Files reconciliation\*\*: mismatch/);
     assert.match(md, /machine verified R5/);

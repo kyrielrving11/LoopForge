@@ -28,11 +28,16 @@ function committedFeedback(
   afterEvidence?: unknown[],
 ): VaultEntry {
   const fields = submittedFields ?? [
-    "success", "output_summary", "constraint_violations", "should_continue",
+    "outcome", "output_summary", "constraint_violations", "should_continue",
   ];
   // v4.0.3: every committed result carries a posture; a metrics fixture that
   // is not about posture uses the neutral not_applicable one.
   const committedResult = {
+    agentSuccessClaim: false,
+    agentOutcome: "failed",
+    gateContradicted: false,
+    newConsecutiveRejections: 0,
+    shouldPushSuccessTrajectory: false,
     ...result,
     evidencePosture: result.evidencePosture ?? fixtureEvidencePosture(round),
   };
@@ -119,20 +124,18 @@ describe("derivePolicyMetrics", () => {
         gateContradicted: false,
         verificationFlags: [],
       }, "l1", [
-        "success", "output_summary", "constraint_violations", "should_continue",
+        "outcome", "output_summary", "constraint_violations", "should_continue",
         "discovered_constraints", "execution_report.files_changed",
         "worker_results",
       ], {
-        success: false,
+        outcome: "failed",
         output_summary: "made progress",
         constraint_violations: [],
         should_continue: true,
         discovered_constraints: ["commands must not touch prod"],
         execution_report: {
           files_changed: ["src/a.ts"],
-          tests_reported: null,
-          criterion_claims: [],
-          contract_item_claims: [],
+
         },
         worker_results: [{
           agentId: "w1",
@@ -148,7 +151,7 @@ describe("derivePolicyMetrics", () => {
     assert.equal(metrics.attemptedFieldUsage.discovered_constraints, 1);
     assert.equal(metrics.attemptedFieldUsage["execution_report.files_changed"], 1);
     assert.equal(metrics.attemptedFieldUsage.worker_results, 1);
-    assert.equal(metrics.attemptedFieldUsage.success, undefined,
+    assert.equal(metrics.attemptedFieldUsage.outcome, undefined,
       "core fields are not field-usage counts");
     assert.equal(metrics.retainedFieldUsage.discovered_constraints, 1);
     assert.equal(metrics.retainedFieldUsage["execution_report.files_changed"], 1);
@@ -165,10 +168,10 @@ describe("derivePolicyMetrics", () => {
         gateContradicted: false,
         verificationFlags: [],
       }, "l1", [
-        "success", "output_summary", "constraint_violations", "should_continue",
+        "outcome", "output_summary", "constraint_violations", "should_continue",
         "subtask_boundary",
       ], {
-        success: false,
+        outcome: "failed",
         output_summary: "made progress",
         constraint_violations: [],
         should_continue: true,
@@ -319,19 +322,17 @@ describe("v3.9.2 — files reconciliation metrics", () => {
     },
   });
   const fields = [
-    "success", "output_summary", "constraint_violations", "should_continue",
+    "outcome", "output_summary", "constraint_violations", "should_continue",
     "execution_report.files_changed",
   ];
   const evaluation = (filesChanged: string[]) => ({
-    success: false,
+    outcome: "failed",
     output_summary: "made progress",
     constraint_violations: [],
     should_continue: true,
     execution_report: {
       files_changed: filesChanged,
-      tests_reported: null,
-      criterion_claims: [],
-      contract_item_claims: [],
+
     },
   });
   const result = {

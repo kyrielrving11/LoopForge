@@ -17,7 +17,7 @@
  *              with stopReason "enforcement_terminated".
  */
 import { makeEnforcementResult } from "./protocol.js";
-import { CHECK_SUCCESS_WITH_REMAINING_CRITERIA, CHECK_RECURRING_VIOLATION, CHECK_REQUIRED_COMMAND_FAILED, CHECK_COMMAND_EVIDENCE_MISMATCH, CHECK_OUTCOME_SUCCESS_CONTRADICTION, CHECK_VERIFICATION_ENTRYPOINT_MODIFIED, CHECK_CONTRACT_ITEMS_UNVERIFIED, CHECK_USER_GATE_UNRESOLVED } from "./verification-gate.js";
+import { CHECK_SUCCESS_WITH_REMAINING_CRITERIA, CHECK_RECURRING_VIOLATION, CHECK_REQUIRED_COMMAND_FAILED, CHECK_VERIFICATION_ENTRYPOINT_MODIFIED, CHECK_CONTRACT_ITEMS_UNVERIFIED, CHECK_USER_GATE_UNRESOLVED, CHECK_CONTRACT_REQUIRED, CHECK_CONTRACT_PREMATURE, CHECK_CONTRACT_SUCCESSOR_UNCHANGED } from "./verification-gate.js";
 import { deriveProgressWindow, } from "./progress.js";
 import { declaresBlocked } from "./round-outcome.js";
 import { getPolicy } from "./policy.js";
@@ -186,17 +186,14 @@ function enforceRecurringViolation(flags) {
         check: "recurring_violation",
     });
 }
-/** R-EVID (v2.14): A required command failure, a test-results mismatch that
- *  hides failures, or a self-contradictory outcome claim contradicts the
+/** R-EVID (v2.14 / v4.0.6): A required command failure contradicts the
  *  success claim before commit. The verification gate detects the
  *  contradiction; this rule decides what to do about it — reject so the
  *  agent redos the SAME round with honest claims. Same-check rejections
  *  accumulate toward R6 via the per-check counter. */
 function enforceEvidenceContradiction(flags) {
     const contradiction = flags.find((f) => f.severity === "error" &&
-        (f.check === CHECK_REQUIRED_COMMAND_FAILED ||
-            f.check === CHECK_COMMAND_EVIDENCE_MISMATCH ||
-            f.check === CHECK_OUTCOME_SUCCESS_CONTRADICTION));
+        f.check === CHECK_REQUIRED_COMMAND_FAILED);
     if (!contradiction)
         return null;
     return makeEnforcementResult({
@@ -208,6 +205,39 @@ function enforceEvidenceContradiction(flags) {
             "do NOT report success when the evidence contradicts it, and " +
             "(c) resubmit an honest SelfEvaluation for the SAME round.",
         check: contradiction.check,
+    });
+}
+/** v4.0.6 R-COVER: contract coverage rules. With after-capable commands, a
+ *  continuing round must leave the next round an active contract; a different
+ *  proposal while the contract is open needs `supersedes`; and a successor for
+ *  a closed contract must bring new acceptance items. The verification gate
+ *  states the structural fact; this row rejects the round with the concrete
+ *  repair. The uniform ladder below escalates repeats. */
+function enforceContractCoverage(flags) {
+    const flag = flags.find((f) => f.severity === "error" &&
+        (f.check === CHECK_CONTRACT_REQUIRED ||
+            f.check === CHECK_CONTRACT_PREMATURE ||
+            f.check === CHECK_CONTRACT_SUCCESSOR_UNCHANGED));
+    if (!flag)
+        return null;
+    const fix = flag.check === CHECK_CONTRACT_REQUIRED
+        ? "This round continues with an after-capable verification command, so the " +
+            "next round must execute under an active Round Contract. Submit " +
+            "round_contract with a work_item and at least one acceptance item bound " +
+            "to a configured command."
+        : flag.check === CHECK_CONTRACT_PREMATURE
+            ? "The active Round Contract is still open. Omit round_contract to continue " +
+                "it unchanged, or — to replace the slice — add " +
+                "round_contract.supersedes with the active rc- id and different acceptance items."
+            : "A closed contract's successor must bring NEW acceptance items. Changing " +
+                "only work_item or scope re-verifies the old slice and is rejected. " +
+                "Declare different item descriptions/commands; if this round is " +
+                "stopping, omit round_contract instead.";
+    return makeEnforcementResult({
+        action: "reject",
+        reason: flag.detail,
+        fix_instructions: fix,
+        check: flag.check,
     });
 }
 /** v3.3: R-EVID-VERIFY — the verification command's entrypoint changed in
@@ -505,7 +535,12 @@ function buildEscalationNotice() {
 const RULE_TABLE = [
     { checks: ["success_with_remaining_criteria"], ladder: "uniform", terminalAfter: 2, noticeOnRepeat: true },
     { checks: ["recurring_violation"], ladder: "uniform", terminalAfter: 2, noticeOnRepeat: true },
-    { checks: ["required_command_failed", "command_evidence_mismatch", "outcome_success_contradiction"], ladder: "uniform", terminalAfter: 2, noticeOnRepeat: true },
+    { checks: ["required_command_failed"], ladder: "uniform", terminalAfter: 2, noticeOnRepeat: true },
+    // v4.0.6: contract coverage — a continuing round must leave an active
+    // contract; a different proposal needs an explicit supersede; a successor
+    // must change the acceptance items. Reject and let the uniform ladder
+    // escalate repeats (three same-check rejections terminate).
+    { checks: ["contract_required", "contract_premature", "contract_successor_unchanged"], ladder: "uniform", terminalAfter: 3, noticeOnRepeat: true },
     // v3.8.3: own ladder — reject → backtrack → terminate. A rewritten
     // entrypoint is not fixed by asking again (the round's baseline is frozen on
     // purpose), so the second occurrence rolls the work back instead of killing
@@ -598,6 +633,8 @@ inFlightProgress = {
         // v2.14: R-EVID — a required command failure, hidden test failures, or
         // a self-contradictory outcome claim contradicts the success claim
         () => enforceEvidenceContradiction(flags),
+        // v4.0.6: contract coverage (required / premature / successor unchanged)
+        () => enforceContractCoverage(flags),
         // v3.3: R-EVID-VERIFY — the verification command entrypoint changed in
         // the same round it ran.
         () => enforceVerificationEntrypointTampered(flags, vaultEntries, currentRound, effectiveRejections, effectiveLastCheck),

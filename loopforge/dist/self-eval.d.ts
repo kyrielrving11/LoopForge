@@ -1,7 +1,7 @@
 /** Structured self-evaluation parsing and normalization — pure functions.
  * The MCP boundary validates required fields before these helpers run.
  */
-import { type ContractTransition, type ExecutionReport, type RoundContractProposal, type SelfEvaluation, type SubGoalUpdate, type SubmissionDiagnostic, type SubmissionDiagnosticHandling } from "./protocol.js";
+import { type ContractSupersede, type ExecutionReport, type RoundContractProposal, type SelfEvaluation, type SubGoalUpdate, type SubmissionDiagnostic, type SubmissionDiagnosticHandling } from "./protocol.js";
 /** A diagnostics sink. `buildSelfEvaluation` keeps working without one; the
  *  submission boundary always supplies one so dropped/normalized payload
  *  fields stay visible on the receipt. */
@@ -39,20 +39,10 @@ export declare function parseExecutionReport(raw: Record<string, unknown> | unde
     id: string;
     text: string;
 }> | null): ExecutionReport | undefined;
-/** v3.8: The criterion ids the agent claims met this round. */
-export declare function claimedMetCriteria(report: {
-    criterion_claims?: Array<{
-        criterion_id: string;
-        outcome: string;
-    }>;
-} | undefined | null): string[];
-/** v3.8: The criterion ids the agent declares still outstanding. */
-export declare function claimedRemainingCriteria(report: {
-    criterion_claims?: Array<{
-        criterion_id: string;
-        outcome: string;
-    }>;
-} | undefined | null): string[];
+/** v4.0.6: The criterion ids the agent claims met this round. */
+export declare function claimedMetCriteria(report: ExecutionReport | undefined | null): string[];
+/** v4.0.6: The criterion ids the agent declares still outstanding. */
+export declare function claimedRemainingCriteria(report: ExecutionReport | undefined | null): string[];
 /** Parse SubGoalUpdate[] from a raw JSON array.
  *  v3.7.1: lenient per-entry filtering (id/status shape) with fixed caps
  *  (20 entries, id ≤ 64, note ≤ 300). Referential validity — unknown IDs
@@ -87,6 +77,8 @@ export interface EvaluationValidation {
         detail: string;
     }>;
 }
+export declare const OBJECTIVE_REFINEMENT_MAX = 1000;
+export declare const BLOCKER_MAX = 500;
 export declare function validateCoreSelfEvaluation(raw: Record<string, unknown>): EvaluationValidation;
 /** v3.7.1: Strict structural checks for the sub-goal protocol fields
  *  (subgoal_updates / emerged_subtasks). Runs in the same pre-advance
@@ -110,24 +102,12 @@ export interface ContractValidationError {
     reason: string;
     detail: string;
 }
-export declare const CONTRACT_TRANSITION_REASON_MAX = 500;
-/** v3.9.9: LENIENT contract-transition parser. Historical/externally written
- *  data produces a diagnostic and is dropped; it never closes a contract and
- *  never throws. The strict submission boundary is the only commit check. */
-export declare function parseContractTransition(raw: unknown, sink?: DiagnosticSink): ContractTransition | undefined;
-/** v3.9.9: the facts the strict transition boundary needs, derived from the
- *  SAME active contract the prompt rendered. `observed: false` means the
- *  session's committed facts could not be read — structure stays strict, but
- *  the active-contract-dependent checks fail open. */
-export interface ContractTransitionValidationContext {
-    observed: boolean;
-    activeContractId: string | null;
-    /** Normalized content identity of every ACTIVE item. */
-    activeItemIdentities: ReadonlySet<string> | null;
-}
-/** v3.9.9: strict transition boundary. Every failure is `contract_invalid` and
- *  the same submissionHandle may retry with a corrected payload. */
-export declare function validateContractTransition(raw: Record<string, unknown>, context: ContractTransitionValidationContext): ContractValidationError[];
+export declare const CONTRACT_SUPERSEDE_REASON_MAX = 500;
+/** v4.0.6: LENIENT parser for the `supersedes` modifier inside a committed
+ *  Round Contract proposal. Historical/externally written data produces a
+ *  diagnostic and is dropped; it never closes a contract and never throws.
+ *  The strict submission boundary is the only commit check. */
+export declare function parseContractSupersede(raw: unknown, sink?: DiagnosticSink, path?: string): ContractSupersede | undefined;
 /** v3.8: Everything the strict contract boundary needs to judge a declaration
  *  against the SAME derived state the agent saw in its prompt. Injected rather
  *  than imported so the validator stays a pure, unit-testable function. */
@@ -135,6 +115,15 @@ export interface ContractValidationContext {
     /** rci- ids of the ACTIVE contract; null when it cannot be observed (fail
      *  open — shape checks stay strict either way). */
     activeItemIds: ReadonlySet<string> | null;
+    /** v4.0.6: the ACTIVE contract id, or null. Null while `observed` is true
+     *  means there is genuinely no active contract. When `observed` is false the
+     *  target-dependent checks fail open. */
+    activeContractId?: string | null;
+    /** v4.0.6: normalized content identity of every ACTIVE item, for the
+     *  "successor acceptance content actually changed" check. */
+    activeItemIdentities?: ReadonlySet<string> | null;
+    /** v4.0.6: whether the active contract facts were observable. */
+    observed?: boolean;
     /** v3.9.4: cr- ids of the ACTIVE criterion set rendered by the prompt. Null
      *  when the compile response cannot be observed (fail open). */
     knownCriterionIds: ReadonlySet<string> | null;

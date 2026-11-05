@@ -405,14 +405,14 @@ export function deriveWorkingMemory(
 
   const redirectSource = [...recent]
     .filter((view) =>
-      view.contractTransition !== null && view.contractTransition !== undefined);
+      view.contractRedirect !== null && view.contractRedirect !== undefined);
   const redirects = redirectSource
     .slice(-WORKING_MEMORY_REDIRECT_LIMIT)
     .reverse()
     .map((view): ContractRedirectMemory => ({
       round: view.round,
-      contractId: view.contractTransition!.contract_id,
-      reason: normalizeWorkingMemoryText(view.contractTransition!.reason ?? ""),
+      contractId: view.contractRedirect!.contract_id,
+      reason: normalizeWorkingMemoryText(view.contractRedirect!.reason ?? ""),
     }));
 
   return {

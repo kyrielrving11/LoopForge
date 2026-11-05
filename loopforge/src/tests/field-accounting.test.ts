@@ -15,7 +15,7 @@ import { makeSelfEvaluation } from "../protocol.js";
 import type { SubmissionDiagnostic } from "../protocol.js";
 
 const BASE = {
-  success: false,
+  outcome: "failed" as const,
   output_summary: "made progress",
   constraint_violations: [],
   should_continue: true,
@@ -39,6 +39,9 @@ function rawFor(path: FieldPath, value: unknown): Record<string, unknown> {
       },
     };
   }
+  // `blocker` is meaningful only with outcome=blocked; the base fixture uses
+  // a non-blocked outcome, so this path needs its own legal context.
+  if (path === "blocker") return { outcome: "blocked", blocker: value };
   return { [path]: value };
 }
 
@@ -67,7 +70,7 @@ interface FieldCase {
 }
 
 const CASES: FieldCase[] = [
-  { path: "success", valid: true, invalid: "yes" },
+  { path: "outcome", valid: "success", invalid: "nope" },
   { path: "output_summary", valid: "done", invalid: 42 },
   { path: "constraint_violations", valid: ["violated"], invalid: "not-array", partial: ["violated", 1] },
   { path: "should_continue", valid: false, invalid: "yes" },
@@ -78,21 +81,15 @@ const CASES: FieldCase[] = [
     partial: ["src/a.ts", 1],
   },
   {
-    path: "execution_report.tests_reported",
-    valid: { passed: 1 },
-    invalid: "not-an-object",
+    path: "execution_report.claims",
+    valid: [{ id: "cr-12345678", outcome: "met" }],
+    invalid: "not-array",
+    partial: [{ id: "cr-12345678", outcome: "met" }, 1],
   },
   {
-    path: "execution_report.contract_item_claims",
-    valid: [{ item_id: "rci-12345678", outcome: "met" }],
-    invalid: "not-array",
-    partial: [{ item_id: "rci-12345678", outcome: "met" }, 1],
-  },
-  {
-    path: "execution_report.criterion_claims",
-    valid: [{ criterion_id: "criterion-a", outcome: "met" }],
-    invalid: "not-array",
-    partial: [{ criterion_id: "criterion-a", outcome: "met" }, 1],
+    path: "objective_refinement",
+    valid: "the overall objective now includes the migration",
+    invalid: 42,
   },
   {
     path: "subgoal_updates",
@@ -138,15 +135,6 @@ const CASES: FieldCase[] = [
   },
   { path: "round_contract", valid: VALID_CONTRACT, invalid: null },
   {
-    path: "contract_transition",
-    valid: {
-      kind: "supersede",
-      contract_id: "rc-12345678",
-      reason: "the active slice is not the right route",
-    },
-    invalid: null,
-  },
-  {
     path: "worker_results",
     valid: [VALID_WORKER],
     invalid: "not-array",
@@ -161,9 +149,7 @@ const CASES: FieldCase[] = [
     partial: [{ round: 1, claim: "fixed it" }, 1],
   },
   { path: "gate_ids", valid: ["g-1"], invalid: "not-array", partial: ["g-1", 1] },
-  { path: "outcome", valid: "success", invalid: "nope" },
   { path: "blocker", valid: "missing credentials", invalid: 42 },
-  { path: "agent_stop_reason", valid: "blocked", invalid: "nope" },
   { path: "no_change_reason", valid: "nothing to change", invalid: "" },
 ];
 
@@ -229,13 +215,13 @@ describe("field accounting — empty and null semantics", () => {
     }
   });
 
-  it("retains explicit tests_reported: null but not an absent key", () => {
-    const nullTests = account({ execution_report: { tests_reported: null } });
-    assert.ok(nullTests.normalized.submittedFields.includes("execution_report.tests_reported"));
-    assert.ok(nullTests.accounting.retained.includes("execution_report.tests_reported"));
+  it("retains an explicit empty claims array but not an absent key", () => {
+    const emptyClaims = account({ execution_report: { claims: [] } });
+    assert.ok(emptyClaims.normalized.submittedFields.includes("execution_report.claims"));
+    assert.ok(emptyClaims.accounting.retained.includes("execution_report.claims"));
 
     const absent = account({});
-    assert.ok(!absent.normalized.submittedFields.includes("execution_report.tests_reported"));
+    assert.ok(!absent.normalized.submittedFields.includes("execution_report.claims"));
   });
 
   it("drops an empty blocker / no_change_reason", () => {
@@ -273,7 +259,7 @@ describe("field accounting — incomplete states", () => {
 
   it("under truncated diagnostics only positive values are retained", () => {
     const evaluation = makeSelfEvaluation({
-      success: false,
+      outcome: "failed",
       output_summary: "",
       constraint_violations: [],
       should_continue: true,
@@ -287,14 +273,14 @@ describe("field accounting — incomplete states", () => {
     }];
     const accounting = deriveFieldAccounting({
       submittedFields: [
-        "success", "output_summary", "constraint_violations", "should_continue",
+        "outcome", "output_summary", "constraint_violations", "should_continue",
         "discovered_constraints",
       ],
       normalizationDiagnostics: diagnostics,
       evaluation,
     });
     assert.equal(accounting.incomplete, true);
-    assert.ok(accounting.retained.includes("success"));
+    assert.ok(accounting.retained.includes("outcome"));
     assert.ok(accounting.retained.includes("should_continue"));
     assert.ok(!accounting.retained.includes("discovered_constraints"),
       "an empty value is uncertain when the loss list is truncated");

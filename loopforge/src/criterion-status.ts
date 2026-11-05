@@ -24,8 +24,9 @@ function claimsFor(
   view: CommittedRoundView,
   text: string,
 ): Array<"met" | "remaining"> {
-  return (view.executionReport?.criterion_claims ?? [])
-    .filter((claim) => criterionRefMatches(claim.criterion_id, text))
+  return (view.executionReport?.claims ?? [])
+    .filter((claim) =>
+      claim.id.startsWith("cr-") && criterionRefMatches(claim.id, text))
     .map((claim) => claim.outcome);
 }
 

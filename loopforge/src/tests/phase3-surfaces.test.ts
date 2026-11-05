@@ -119,7 +119,6 @@ describe("v4.0.3 — replay surfaces", () => {
     const mid = checkpoint(loopId, 1, "mid", transactionId);
     const entry = committedFeedbackRound(1, {
       loopId,
-      success: true,
       outcome: "success",
       outputSummary: "x".repeat(4200),
       wrongAssumptions: ["old belief"],
@@ -143,8 +142,7 @@ describe("v4.0.3 — replay surfaces", () => {
       gateIds: ["gate-1"],
       subgoalUpdates: [{ id: "sg-1", status: "done", note: "finished" }],
       contractTransition: {
-        kind: "supersede",
-        contract_id: "rc-12345678",
+                contract_id: "rc-12345678",
         reason: "route changed",
       },
       roundEvidence: [commandObservation("verify", "passed")],
@@ -245,7 +243,7 @@ describe("v4.0.3 — explain surfaces", () => {
     const loopId = "explain-surface";
     const entry = committedFeedbackRound(1, {
       loopId,
-      success: true,
+      outcome: "success",
       outputSummary: "done",
       noChangeReason: "docs only",
       subtaskBoundaryLabel: "slice done",
@@ -355,7 +353,7 @@ describe("v4.0.3 — audit surfaces", () => {
       committedFeedbackRound(1, {
         loopId,
         criteria: [CRITERION],
-        success: true,
+        outcome: "success",
         met: [CRITERION],
         evidencePosture: fixtureEvidencePosture(1, {
           status: "insufficient",
@@ -397,7 +395,6 @@ describe("v4.0.3 — metrics separate claims from machine facts", () => {
     const entries = [
       committedFeedbackRound(1, {
         loopId,
-        success: true,
         outcome: "success",
         evidencePosture: fixtureEvidencePosture(1, {
           status: "verified",
@@ -406,7 +403,6 @@ describe("v4.0.3 — metrics separate claims from machine facts", () => {
       }),
       committedFeedbackRound(2, {
         loopId,
-        success: true,
         outcome: "partial",
         evidencePosture: fixtureEvidencePosture(2, {
           status: "insufficient",

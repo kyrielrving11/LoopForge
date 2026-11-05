@@ -9,9 +9,9 @@
  */
 
 import type {
-  ContractItemClaim,
   ContractItemStatus,
-  ContractTransition,
+  ContractSupersede,
+  ExecutionClaim,
   ExecutionReport,
 } from "./protocol.js";
 import type { ActiveContractView, ActiveContractItem } from "./round-contract.js";
@@ -26,10 +26,11 @@ interface RoundSlice {
   round: number;
   report: ExecutionReport | null;
   deltas: ReadonlyArray<ObservationDelta>;
-  /** The round's ONE blocked declaration (outcome or agent_stop_reason). */
+  /** The round's ONE blocked declaration (`outcome: "blocked"`). */
   blocked: boolean;
-  /** v3.9.9: the round's explicit contract redirect, if it declared one. */
-  transition: ContractTransition | null;
+  /** v3.9.9/v4.0.6: the round's explicit contract redirect, if it declared
+   *  one (`round_contract.supersedes`). */
+  redirect: ContractSupersede | null;
 }
 
 export interface ItemStatusHistoryEntry {
@@ -73,9 +74,9 @@ export interface ContractItemInput {
    *  the round being decided is not committed yet. Leave false where no
    *  in-flight round exists (a pure committed-history replay). */
   currentBlocked?: boolean;
-  /** v3.9.9: the in-flight (or decoded committed) round's transition. It
-   *  closes the contract as `superseded` only when its target matches. */
-  currentTransition?: ContractTransition | null;
+  /** v3.9.9/v4.0.6: the in-flight (or decoded committed) round's redirect.
+   *  It closes the contract as `superseded` only when its target matches. */
+  currentRedirect?: ContractSupersede | null;
   commands: ReadonlyArray<CommandEvidencePolicy>;
 }
 
@@ -92,11 +93,11 @@ const EMPTY_VIEW: ContractItemStatusView = {
 function itemClaims(
   item: ActiveContractItem,
   slices: ReadonlyArray<RoundSlice>,
-): Array<{ round: number; outcome: ContractItemClaim["outcome"] }> {
-  const claims: Array<{ round: number; outcome: ContractItemClaim["outcome"] }> = [];
+): Array<{ round: number; outcome: ExecutionClaim["outcome"] }> {
+  const claims: Array<{ round: number; outcome: ExecutionClaim["outcome"] }> = [];
   for (const slice of slices) {
-    for (const claim of slice.report?.contract_item_claims ?? []) {
-      if (claim.item_id === item.id) claims.push({ round: slice.round, outcome: claim.outcome });
+    for (const claim of slice.report?.claims ?? []) {
+      if (claim.id === item.id) claims.push({ round: slice.round, outcome: claim.outcome });
     }
   }
   return claims;
@@ -105,7 +106,7 @@ function itemClaims(
 /** The round in which the item was last claimed `met` (null when the latest
  *  claim is `remaining` or there is none). */
 function metClaimRound(
-  claims: ReadonlyArray<{ round: number; outcome: ContractItemClaim["outcome"] }>,
+  claims: ReadonlyArray<{ round: number; outcome: ExecutionClaim["outcome"] }>,
 ): number | null {
   const last = claims[claims.length - 1];
   return last && last.outcome === "met" ? last.round : null;
@@ -204,14 +205,14 @@ export function deriveContractItemStatuses(input: ContractItemInput): ContractIt
       blocked: round.evaluation
         ? declaresBlocked(round.evaluation)
         : round.agentOutcome === "blocked",
-      transition: round.contractTransition,
+      redirect: round.contractRedirect,
     })),
     {
       round: input.currentRound,
       report: input.currentReport,
       deltas: input.currentDeltas,
       blocked: input.currentBlocked === true,
-      transition: input.currentTransition ?? null,
+      redirect: input.currentRedirect ?? null,
     },
   ].filter((slice) => slice.round < input.currentRound || slice.round === input.currentRound);
 
@@ -266,15 +267,15 @@ export function deriveContractItemStatuses(input: ContractItemInput): ContractIt
   const committingRound = slices[slices.length - 1];
   const blocked = committingRound?.blocked === true;
   const allVerified = items.length > 0 && verifiedCount === items.length;
-  // v3.9.9 closure priority: blocked > superseded > verified > open.
+  // v3.9.9/v4.0.6 closure priority: blocked > superseded > verified > open.
   // A blocked declaration is the Agent's protocol action and closes the
-  // contract first. A transition supersedes only when its target is THIS
+  // contract first. A redirect supersedes only when its target is THIS
   // contract; an inert/abnormal target is ignored rather than closing a
   // contract the Agent never named.
   const superseded = !blocked &&
-    committingRound?.transition !== null &&
-    committingRound?.transition !== undefined &&
-    committingRound.transition.contract_id === contract.id;
+    committingRound?.redirect !== null &&
+    committingRound?.redirect !== undefined &&
+    committingRound.redirect.contract_id === contract.id;
   const closure: ContractItemStatusView["closure"] =
     blocked ? "blocked"
       : superseded ? "superseded"

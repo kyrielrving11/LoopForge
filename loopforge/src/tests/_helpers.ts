@@ -26,9 +26,9 @@ import {
 import type {
   CheckpointRef,
   CompiledRoundFacts,
-  ContractTransition,
-  CriterionClaim,
+  ContractSupersede,
   EvidencePosture,
+  ExecutionClaim,
   MachineObservation,
   PromptArtifact,
   RoundContractProposal,
@@ -44,6 +44,7 @@ import type {
 } from "../evidence-provider.js";
 import { GIT_WORKSPACE_COVERAGE } from "../git-motion.js";
 import { getPolicy } from "../policy.js";
+import { deriveCriterionId } from "../token-utils.js";
 import { POLICY_SCHEMA_VERSION } from "../policy.js";
 
 /** The compiler's default objective criterion when the task declares none. */
@@ -79,6 +80,79 @@ export function fixtureRollbackEvidencePosture(round: number): EvidencePosture {
   return fixtureEvidencePosture(round, { kind: "rollback" });
 }
 
+/** v4.0.6 fixture: a continuing round with an after-capable command must
+ *  leave an active contract. Test suites that are not about contract flow use
+ *  a per-round default slice so ordinary continuations satisfy coverage.
+ *
+ *  When `activeItemIds` is supplied, the evaluation also claims those ACTIVE
+ *  items `met` so the round's passed verification command closes the old
+ *  contract before the successor proposal is judged. The per-round tag keeps
+ *  every successor's acceptance content distinct (`contract_successor_unchanged`). */
+export function withDefaultContract(
+  input: Record<string, unknown>,
+  options: { tag?: string; activeItemIds?: readonly string[] } = {},
+): Record<string, unknown> {
+  const evaluation = input.evaluation;
+  if (!evaluation || typeof evaluation !== "object" || Array.isArray(evaluation)) {
+    return input;
+  }
+  const record = evaluation as Record<string, unknown>;
+  if (record.outcome === "blocked") return input;
+  const continuing = record.should_continue !== false;
+  // A stop round carries no new contract, but it may still close the ACTIVE
+  // one; claim management follows contract management, not "continuing".
+  const managingContract = record.round_contract === undefined;
+  const injectingContract = continuing && managingContract;
+  const command = getPolicy().evidence.commands.find(
+    (candidate) => candidate.enabled &&
+      (candidate.phase === "after" || candidate.phase === "both"));
+  if (!command) return input;
+  const tag = options.tag ?? "default";
+  const claims: Array<{ id: string; outcome: "met" }> = [];
+  const report = record.execution_report;
+  const reportRecord = report && typeof report === "object" && !Array.isArray(report)
+    ? report as Record<string, unknown>
+    : {};
+  const existingClaims = Array.isArray(reportRecord.claims)
+    ? reportRecord.claims as Array<Record<string, unknown>>
+    : [];
+  const claimed = new Set(existingClaims.map((claim) => String(claim.id)));
+  // Only the fixture's own default contract carries the active-item claim.
+  // A test that provides an explicit proposal is exercising contract
+  // semantics itself and must control its claims.
+  if (managingContract) {
+    for (const id of options.activeItemIds ?? []) {
+      if (!claimed.has(id)) claims.push({ id, outcome: "met" });
+    }
+  }
+  const effectiveReport: Record<string, unknown> = {
+    ...reportRecord,
+    ...(existingClaims.length > 0 || claims.length > 0
+      ? { claims: [...existingClaims, ...claims] }
+      : {}),
+  };
+  return {
+    ...input,
+    evaluation: {
+      ...record,
+      ...(injectingContract
+        ? {
+            round_contract: {
+              work_item: `test slice ${tag}`,
+              items: [{
+                description: `the configured verification command passes (${tag})`,
+                verify_with: [command.name],
+              }],
+            },
+          }
+        : {}),
+      ...(Object.keys(effectiveReport).length > 0
+        ? { execution_report: effectiveReport }
+        : {}),
+    },
+  };
+}
+
 /** v4.0.0: tool-handler wrapper that supplies the current held handle for
  *  tests that drive the handler directly. A test that deliberately submits a
  *  stale handle passes `input.submissionHandle` explicitly. */
@@ -92,9 +166,15 @@ export function toolNext(
       "",
   );
   const handle = input.submissionHandle ?? mgr.getSubmissionHandle(sessionId);
+  const session = mgr.get(sessionId);
+  const active = mgr.getActiveContract(sessionId);
+  const prepared = withDefaultContract(input, {
+    tag: `r${session?.currentRound ?? 1}`,
+    activeItemIds: (active?.items ?? []).map((item) => item.id),
+  });
   return import("../mcp/tools.js").then(({ TOOL_HANDLERS }) =>
     TOOL_HANDLERS.loopforge_next(mgr, {
-      ...input,
+      ...prepared,
       ...(handle ? { submissionHandle: handle } : {}),
     }),
   );
@@ -110,10 +190,19 @@ export async function advanceWithHeld(
   evaluation?: unknown,
   submissionHandle?: SubmissionHandle,
 ) {
+  const session = mgr.get(sessionId);
+  const active = mgr.getActiveContract(sessionId);
+  const effective = evaluation && typeof evaluation === "object" &&
+    !Array.isArray(evaluation)
+    ? withDefaultContract({ evaluation }, {
+        tag: `r${session?.currentRound ?? 1}`,
+        activeItemIds: (active?.items ?? []).map((item) => item.id),
+      }).evaluation
+    : evaluation;
   return mgr.advance(
     submissionHandle ?? mgr.getSubmissionHandle(sessionId),
     output,
-    evaluation,
+    effective,
   );
 }
 
@@ -132,12 +221,25 @@ export function fixtureBeforeCheckpointError(observations: unknown): {
     : {};
 }
 
-/** v3.8: Build the criterion claims an evaluation submits. */
-export function criterionClaims(met: string[] = [], remaining: string[] = []): CriterionClaim[] {
+/** v3.8 / v4.0.6: Build the claims an evaluation submits. The helper keeps its
+ *  historical name (tests call it for `cr-` claims), but the entries use the
+ *  ONE `{ id, outcome }` claims shape. */
+export function criterionClaims(met: string[] = [], remaining: string[] = []): ExecutionClaim[] {
+  const idOf = (value: string): string =>
+    value.startsWith("cr-") || value.startsWith("rci-")
+      ? value
+      : deriveCriterionId(value);
   return [
-    ...met.map((criterion_id) => ({ criterion_id, outcome: "met" as const })),
-    ...remaining.map((criterion_id) => ({ criterion_id, outcome: "remaining" as const })),
+    ...met.map((value) => ({ id: idOf(value), outcome: "met" as const })),
+    ...remaining.map((value) => ({ id: idOf(value), outcome: "remaining" as const })),
   ];
+}
+
+/** v4.0.6: an `rci-` claim list in the ONE claims shape. */
+export function itemClaims(
+  claims: Array<{ item_id: string; outcome: "met" | "remaining" }> = [],
+): ExecutionClaim[] {
+  return claims.map((claim) => ({ id: claim.item_id, outcome: claim.outcome }));
 }
 
 /** A committed round always carries its attempted manifest. Tests build the
@@ -145,16 +247,16 @@ export function criterionClaims(met: string[] = [], remaining: string[] = []): C
  *  accounting read model sees the same fields the round declared. */
 export function manifestFor(evaluation: SelfEvaluation): string[] {
   const fields = [
-    "success", "output_summary", "constraint_violations", "should_continue",
+    "outcome", "output_summary", "constraint_violations", "should_continue",
   ];
   if (evaluation.execution_report) {
-    fields.push("execution_report.files_changed", "execution_report.tests_reported");
-    if ((evaluation.execution_report.criterion_claims ?? []).length > 0) {
-      fields.push("execution_report.criterion_claims");
+    fields.push("execution_report.files_changed");
+    if ((evaluation.execution_report.claims ?? []).length > 0) {
+      fields.push("execution_report.claims");
     }
-    if ((evaluation.execution_report.contract_item_claims ?? []).length > 0) {
-      fields.push("execution_report.contract_item_claims");
-    }
+  }
+  if (evaluation.objective_refinement !== undefined) {
+    fields.push("objective_refinement");
   }
   if ((evaluation.discovered_constraints ?? []).length > 0) fields.push("discovered_constraints");
   if ((evaluation.emerged_subtasks ?? []).length > 0) fields.push("emerged_subtasks");
@@ -164,8 +266,6 @@ export function manifestFor(evaluation: SelfEvaluation): string[] {
   if ((evaluation.open_questions ?? []).length > 0) fields.push("open_questions");
   if ((evaluation.resolved_open_question_ids ?? []).length > 0) fields.push("resolved_open_question_ids");
   if (evaluation.round_contract) fields.push("round_contract");
-  if (evaluation.contract_transition) fields.push("contract_transition");
-  if (evaluation.outcome) fields.push("outcome");
   return fields;
 }
 
@@ -295,8 +395,9 @@ export function committedFeedbackRound(
     stopReason?: import("../protocol.js").StopReason;
     /** v4.0.2: committed report facts for Working Memory / replay / explain. */
     outputSummary?: string;
-    /** v4.0.4: the Agent's declared stop reason (an Agent report). */
-    agentStopReason?: SelfEvaluation["agent_stop_reason"];
+    /** Fixture convenience: maps a legacy stop declaration onto the ONE
+     *  `outcome` + `blocker` shape. */
+    agentStopReason?: "gave_up" | "blocked" | "needs_human_input";
     /** v4.0.4: the Agent's declared should_continue. */
     shouldContinue?: boolean;
     wrongAssumptions?: string[];
@@ -310,8 +411,13 @@ export function committedFeedbackRound(
     contractBinding?: unknown;
     /** v3.8: committed item claims (replaces the legacy `met` list). */
     contractItemClaims?: Array<{ item_id: string; outcome: "met" | "remaining" }>;
-    /** v3.9.9: a committed contract redirect. */
-    contractTransition?: ContractTransition;
+    /** v3.9.9/v4.0.6: a committed contract redirect; merged into the
+     *  contract proposal's optional `supersedes`. */
+    contractTransition?: ContractSupersede;
+    /** v4.0.6: the Agent's committed overall-objective refinement. */
+    objectiveRefinement?: string;
+    /** The operator acceptance task carried by this committed round. */
+    task?: string;
     /** v4.0.1: the prompt artifact stamped on the committed transaction. */
     promptArtifact?: PromptArtifact;
     /** v4.0.1: compile facts stamped on the committed transaction. */
@@ -339,20 +445,36 @@ export function committedFeedbackRound(
   } = {},
 ): VaultEntry {
   const loopId = opts.loopId ?? "cc";
+  const fixtureOutcome = opts.outcome ??
+    (opts.agentStopReason === "blocked" || opts.agentStopReason === "needs_human_input"
+      ? "blocked"
+      : opts.success ? "success" : "failed");
+  const fixtureBlocker = opts.blocker ??
+    (fixtureOutcome === "blocked"
+      ? (opts.agentStopReason === "needs_human_input"
+          ? "needs human input (fixture)"
+          : "blocked (fixture)")
+      : undefined);
+  const fixtureContract = opts.contract
+    ? {
+        ...opts.contract,
+        ...(opts.contractTransition
+          ? { supersedes: opts.contractTransition }
+          : {}),
+      }
+    : opts.contract;
   const evaluation = makeSelfEvaluation({
-    success: opts.success ?? false,
+    outcome: fixtureOutcome,
     output_summary: opts.outputSummary ?? `Committed round ${round}.`,
     constraint_violations: opts.constraintViolations ?? [],
     should_continue: opts.shouldContinue ?? true,
-    ...(opts.agentStopReason ? { agent_stop_reason: opts.agentStopReason } : {}),
-    outcome: opts.outcome,
+    objective_refinement: opts.objectiveRefinement,
     wrong_assumptions: opts.wrongAssumptions ?? [],
     retracted_constraints: opts.retractedConstraints ?? [],
     open_questions: opts.openQuestions ?? [],
     resolved_open_question_ids: opts.resolvedOpenQuestionIds ?? [],
-    blocker: opts.blocker,
-    round_contract: opts.contract,
-    contract_transition: opts.contractTransition,
+    blocker: fixtureBlocker,
+    round_contract: fixtureContract,
     emerged_subtasks: opts.emergedSubtasks ?? [],
     subgoal_updates: opts.subgoalUpdates ?? [],
     worker_results: opts.workerResults ?? [],
@@ -366,11 +488,10 @@ export function committedFeedbackRound(
       ? undefined
       : makeExecutionReport({
           files_changed: opts.files ?? [],
-          tests_reported: { passed: 0, failed: 0, skipped: 0 },
-          criterion_claims: criterionClaims(opts.met ?? [], opts.remaining ?? []),
-          ...(opts.contractItemClaims
-            ? { contract_item_claims: opts.contractItemClaims }
-            : {}),
+          claims: [
+            ...criterionClaims(opts.met ?? [], opts.remaining ?? []),
+            ...itemClaims(opts.contractItemClaims ?? []),
+          ],
         }),
   });
   return {
@@ -395,14 +516,14 @@ export function committedFeedbackRound(
           beforeEvidence: opts.beforeEvidence ?? [],
           afterEvidence: opts.roundEvidence,
           operatorAcceptance: {
-            task: "Test task",
+            task: opts.task ?? "Test task",
             success_criteria: opts.criteria ?? [],
             hard_constraints: [],
           },
           ...(opts.beforeCheckpoint ? { beforeCheckpoint: opts.beforeCheckpoint } : {}),
           ...(opts.checkpoints ? { checkpoints: opts.checkpoints } : {}),
           compiled: opts.compiled ?? {
-            task: "Test task",
+            task: opts.task ?? "Test task",
             goalId: "",
             constraintsActive: [],
             constraintsRetired: [],
@@ -420,8 +541,8 @@ export function committedFeedbackRound(
           action: opts.action ?? "continue",
           ...(opts.stopReason ? { stopReason: opts.stopReason } : {}),
           verificationFlags: opts.verificationFlags ?? [],
-          agentSuccessClaim: opts.success ?? false,
-          agentOutcome: opts.outcome ?? (opts.success ? "success" : "failed"),
+          agentSuccessClaim: fixtureOutcome === "success",
+          agentOutcome: fixtureOutcome,
           evidencePosture: opts.evidencePosture ?? fixtureEvidencePosture(round),
         },
       },
@@ -523,8 +644,12 @@ export function withTransaction(
   const round = Number(lineage.round ?? entry.round ?? 0);
   entry.task_id = `loop:${loopId}:r${round}:feedback`;
   entry.task_type = "feedback";
+  const outcome = entry.outcome === "success" || entry.outcome === "partial" ||
+    entry.outcome === "failed" || entry.outcome === "blocked"
+    ? entry.outcome as SelfEvaluation["outcome"]
+    : (entry.success === true ? "success" as const : "failed" as const);
   const evaluation = {
-    success: entry.success === true,
+    outcome,
     output_summary: String(entry.output_summary ?? ""),
     constraint_violations: Array.isArray(entry.constraint_violations)
       ? entry.constraint_violations
@@ -559,12 +684,8 @@ export function withTransaction(
     ...(entry.execution_report !== undefined
       ? { execution_report: entry.execution_report }
       : {}),
-    ...(entry.outcome !== undefined ? { outcome: entry.outcome } : {}),
     ...(entry.round_contract !== undefined
       ? { round_contract: entry.round_contract }
-      : {}),
-    ...(entry.contract_transition !== undefined
-      ? { contract_transition: entry.contract_transition }
       : {}),
   } as unknown as SelfEvaluation;
   const result = {
@@ -572,8 +693,8 @@ export function withTransaction(
     verificationFlags: Array.isArray(entry.verification_flags)
       ? entry.verification_flags
       : [],
-    agentSuccessClaim: entry.success === true,
-    agentOutcome: entry.success === true ? "success" : "failed",
+    agentSuccessClaim: outcome === "success",
+    agentOutcome: outcome,
     gateContradicted: false,
     evidencePosture: fixtureEvidencePosture(round),
     newConsecutiveRejections: 0,
@@ -657,27 +778,44 @@ export function mergedLineageRound(
     /** v3.9.1: committed constraint violations and verification flags. */
     constraintViolations?: string[];
     verificationFlags?: VerificationFlag[];
-    /** v3.9.9: a committed contract redirect. */
-    contractTransition?: ContractTransition;
+    /** v3.9.9/v4.0.6: a committed contract redirect. */
+    contractTransition?: ContractSupersede;
+    /** v4.0.6: the Agent's committed overall-objective refinement. */
+    objectiveRefinement?: string;
+    /** The operator acceptance task carried by this committed round. */
+    task?: string;
   } = {},
 ): Record<string, unknown> {
   const loopId = opts.loopId ?? "me";
+  const fixtureOutcome = opts.outcome ?? (opts.success ? "success" : "failed");
+  const fixtureContract = opts.contract
+    ? {
+        ...opts.contract,
+        ...(opts.contractTransition
+          ? { supersedes: opts.contractTransition }
+          : {}),
+      }
+    : opts.contract;
   const lin: Record<string, unknown> = {
     loop_id: loopId,
     round,
-    success: opts.success ?? false,
+    outcome: fixtureOutcome,
     ...(opts.outputSummary !== undefined ? { output_summary: opts.outputSummary } : {}),
     ...(opts.committed === false
       ? {}
       : { committed_action: opts.action ?? "continue" }),
     execution_report: {
       files_changed: opts.files ?? [],
-      tests_reported: { passed: 0, failed: 0, skipped: 0 },
-      criterion_claims: criterionClaims(opts.met ?? []),
+      claims: [
+        ...criterionClaims(opts.met ?? []),
+        ...itemClaims(opts.contractItemClaims ?? []),
+      ],
     },
   };
-  if (opts.contract) lin.round_contract = opts.contract;
-  if (opts.outcome !== undefined) lin.outcome = opts.outcome;
+  if (fixtureContract) lin.round_contract = fixtureContract;
+  if (opts.objectiveRefinement !== undefined) {
+    lin.objective_refinement = opts.objectiveRefinement;
+  }
   if (opts.attempt !== undefined) lin.attempt = opts.attempt;
   if (opts.beforeEvidence !== undefined) lin.before_evidence = opts.beforeEvidence;
   if (opts.roundEvidence !== undefined) lin.after_evidence = opts.roundEvidence;
@@ -686,51 +824,43 @@ export function mergedLineageRound(
     loop_id: loopId,
     task_id: `loop:${loopId}:r${round}:feedback`,
     task_type: "feedback",
-    success: opts.success ?? false,
+    outcome: fixtureOutcome,
     ...(opts.outputSummary !== undefined ? { output_summary: opts.outputSummary } : {}),
     execution_report: {
       files_changed: opts.files ?? [],
-      tests_reported: { passed: 0, failed: 0, skipped: 0 },
-      criterion_claims: criterionClaims(opts.met ?? []),
+      claims: [
+        ...criterionClaims(opts.met ?? []),
+        ...itemClaims(opts.contractItemClaims ?? []),
+      ],
     },
   };
-  if (opts.contract) body.round_contract = opts.contract;
-  if (opts.outcome !== undefined) body.outcome = opts.outcome;
-  // decodeMergedRound reads `raw[key] ?? lineage[key]` — the body wins, so the
-  // item claims must be stamped on BOTH shapes.
-  if (opts.contractItemClaims) {
-    const withClaims = (report: Record<string, unknown>): Record<string, unknown> => ({
-      ...report,
-      contract_item_claims: opts.contractItemClaims,
-    });
-    lin.execution_report = withClaims(lin.execution_report as Record<string, unknown>);
-    body.execution_report = withClaims(body.execution_report as Record<string, unknown>);
+  if (fixtureContract) body.round_contract = fixtureContract;
+  if (opts.objectiveRefinement !== undefined) {
+    body.objective_refinement = opts.objectiveRefinement;
   }
   // v3.9.1: a merged entry is only committed history when it carries the
   // embedded transaction snapshot. Build the SAME envelope a real commit
   // writes, so decodeMergedRound has one factual source.
   const evaluation = makeSelfEvaluation({
-    success: opts.success ?? false,
+    outcome: fixtureOutcome,
     output_summary: opts.outputSummary ?? "",
     constraint_violations: opts.constraintViolations ?? [],
     should_continue: true,
-    outcome: opts.outcome,
-    round_contract: opts.contract,
-    contract_transition: opts.contractTransition,
+    objective_refinement: opts.objectiveRefinement,
+    round_contract: fixtureContract,
     execution_report: makeExecutionReport({
       files_changed: opts.files ?? [],
-      tests_reported: { passed: 0, failed: 0, skipped: 0 },
-      criterion_claims: criterionClaims(opts.met ?? []),
-      ...(opts.contractItemClaims
-        ? { contract_item_claims: opts.contractItemClaims }
-        : {}),
+      claims: [
+        ...criterionClaims(opts.met ?? []),
+        ...itemClaims(opts.contractItemClaims ?? []),
+      ],
     }),
   });
   const result = {
     action: opts.action ?? "continue",
     verificationFlags: opts.verificationFlags ?? [],
-    agentSuccessClaim: opts.success ?? false,
-    agentOutcome: opts.outcome ?? (opts.success ? "success" : "failed"),
+    agentSuccessClaim: fixtureOutcome === "success",
+    agentOutcome: fixtureOutcome,
     gateContradicted: false,
     evidencePosture: fixtureEvidencePosture(round),
     newConsecutiveRejections: 0,
@@ -749,12 +879,12 @@ export function mergedLineageRound(
     beforeEvidence: opts.beforeEvidence ?? [],
     afterEvidence: opts.roundEvidence ?? [],
     operatorAcceptance: {
-      task: String(body.task ?? "Test task"),
+      task: opts.task ?? "Test task",
       success_criteria: [],
       hard_constraints: [],
     },
     compiled: {
-      task: String(body.task ?? "Test task"),
+      task: opts.task ?? "Test task",
       goalId: "",
       constraintsActive: Array.isArray(lin.constraints_active)
         ? lin.constraints_active as string[]
@@ -817,7 +947,10 @@ export function testCommandProvider(): {
 /** v3.3: Write a loop_policy.json (with a passing verification command) into
  *  a subprocess working directory — the CLI child loads policy from its own
  *  cwd, so in-process policy injection does not reach spawned servers. */
-export function writeMachineBackedPolicy(dir: string): void {
+export function writeMachineBackedPolicy(
+  dir: string,
+  options: { commands?: ReturnType<typeof testCommandProvider>[] } = {},
+): void {
   mkdirSync(dir, { recursive: true });
   writeFileSync(join(dir, "loop_policy.json"), JSON.stringify({
     // v3.8.1: the policy version is load-bearing — a file that does not
@@ -827,7 +960,7 @@ export function writeMachineBackedPolicy(dir: string): void {
     evidence: {
       providers: ["git"],
       timeout_ms: 120000,
-      commands: [testCommandProvider()],
+      commands: options.commands ?? [testCommandProvider()],
     },
   }, null, 2));
 }

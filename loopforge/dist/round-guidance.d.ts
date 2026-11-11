@@ -1,10 +1,14 @@
-/** v4.0.4: the ONE runtime source of round-boundary and context-continuity
- *  guidance.
+/** v4.0.4 / v4.0.7: the ONE runtime source of round-boundary and
+ *  context-continuity guidance.
  *
- *  The compiled prompt footer, the MCP server instructions, the state file and
- *  the Explain view read these constants. The Forge skill keeps only the
- *  definitions and a pointer; it must not grow a second copy of the executable
- *  sizing rules.
+ *  The compiled prompt footer, the MCP server instructions, the tools/list
+ *  `contextMode` description, the state file and the Explain view read these
+ *  constants. The Forge skill keeps only the definitions and a pointer; it
+ *  must not grow a second copy of the executable sizing rules.
+ *
+ *  `HOST_INVOCATION_CONTRACT` is server-density prose only: the per-round
+ *  prompt footer carries the Agent action surface, not the host runtime
+ *  contract. `CONTEXT_MODE_DESCRIPTION` is the ONE tools/list description.
  *
  *  This module is pure: no I/O, no policy, no time, no randomness.
  */
@@ -17,6 +21,14 @@ export declare const ROUND_BOUNDARY_NON_BOUNDARIES: string;
  *  The prompt footer and the short retry guidance read it. LoopForge — not
  *  the Agent — recompiles the same round/attempt in clean context. */
 export declare const ROUND_BOUNDARY_INVOCATION_LOST: string;
+/** v4.0.7: the ONE host invocation contract. It separates the cleared model
+ *  conversation from the warm host runtime and states what LoopForge does not
+ *  manage. It is rendered at server density only; the per-round prompt footer
+ *  does not repeat it. */
+export declare const HOST_INVOCATION_CONTRACT: string;
+/** v4.0.7: the ONE tools/list description of PromptContextMode. tools.ts
+ *  imports it so the wire description and the runtime prose cannot drift. */
+export declare const CONTEXT_MODE_DESCRIPTION: string;
 /** The host execution contract. It names the four context strategies instead
  *  of asking the host to reinterpret an enum value:
  *  clean context, in-context repair, clean-context repair, recovery redo. */

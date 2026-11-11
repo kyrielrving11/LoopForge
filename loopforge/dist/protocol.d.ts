@@ -845,8 +845,8 @@ export interface PromptCoverage {
 /** Immutable record of the exact prompt delivered for one round attempt. */
 /** v4.0.2 / v4.0.4: the context boundary of one prompt delivery.
  *
- *  `fresh_invocation` means CLEAN CONTEXT: the host starts a NEW Agent
- *  invocation with only this prompt, the loop/session identity and the
+ *  `fresh_invocation` means CLEAN CONTEXT: the host starts a NEW MODEL
+ *  CONVERSATION with only this prompt, the loop/session identity and the
  *  committed/derived facts it carries; the previous transcript, tool logs and
  *  uncommitted reasoning are NOT part of it. A clean context is not a new
  *  loop and not a workspace reset: the loopId and the current modified
@@ -854,6 +854,25 @@ export interface PromptCoverage {
  *  escalation or recovered retry) or the next logical round after the last
  *  commit. Read `contextReason` and `attempt`
  *  together; a fresh invocation alone does not mean a new round.
+ *
+ *  What `fresh_invocation` clears is MODEL CONVERSATION STATE — the previous
+ *  transcript, tool outputs and uncommitted reasoning. It does NOT require
+ *  the host to restart its process, MCP connection, tool services, installed
+ *  skill files or workspace; a host process that stays alive may keep those
+ *  warm, and it holds the submissionHandle for this invocation's tool calls.
+ *  A warm runtime is not model memory: the new conversation knows only what
+ *  this prompt and the host's stable environment provide. LoopForge does not
+ *  manage provider prompt/KV caches or implicit Agent habits and neither
+ *  clears nor relies on them. Only committed facts and the bounded
+ *  projections LoopForge returns for this invocation are guaranteed;
+ *  anything else that must survive belongs to explicit host configuration,
+ *  not a second LoopForge fact source.
+ *
+ *  The legal `fresh_invocation` reasons are `first_round`, `next_round`,
+ *  `recovery_redo`, `rejection_escalation` and `invocation_recovery`;
+ *  `enforcement_retry` belongs only to `same_round_retry`. The one prose
+ *  source for the host contract is `HOST_INVOCATION_CONTRACT` in
+ *  `round-guidance.ts`.
  *
  *  `same_round_retry` means IN-CONTEXT REPAIR: a retry below the repeated
  *  rejection escalation threshold. Prompt density is independent: an L0/L1/L2
@@ -987,7 +1006,8 @@ export interface PromptArtifact {
     round: number;
     attempt: number;
     level: "l0" | "l1" | "l2";
-    /** v4.0.2: the derived context boundary of THIS delivery. */
+    /** The context boundary of THIS delivery: a new model conversation or an
+     *  in-context retry. It is not a host/tool restart; see PromptContextMode. */
     contextMode: PromptContextMode;
     contextReason: PromptContextReason;
     renderedPrompt: string;

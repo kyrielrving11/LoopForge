@@ -36,9 +36,9 @@ LoopForge 记录观察并应用轮次规则
 
 Agent 报告描述它认为发生了什么，但报告本身不是证明。LoopForge 将报告与可用观察对照，例如 Git 工作区变化和明确配置的验证命令。观察不可用时，LoopForge 保留未知状态，不会将它当成通过或空变更。
 
-每个 prompt 都带有派生出的上下文策略。`fresh_invocation` 表示干净上下文：宿主启动新的 Agent invocation，上一轮 transcript、工具日志和未提交推理不会进入下一轮；它用于第一轮、正常下一轮、recovery redo，或同一检查连续拒绝后的升级，并且可能仍是**同一个逻辑轮**。`same_round_retry` 表示原上下文修复，继续原 invocation 并注入失败原因与发现。`rejection_escalation` 表示重开上下文的重试，失败经验仍随提示携带。如果收到 in-context retry prompt 的 invocation 已不存在，调用 `loopforge_resume(loopId, invocationLost: true)`：LoopForge 会把**同一轮、同一 attempt** 重新编译为 L2 的 `fresh_invocation` / `invocation_recovery`，携带 Machine Evidence、有界 Working Memory 与拒绝教训。
+每个 prompt 都带有派生出的上下文策略。`fresh_invocation` 表示干净上下文：宿主启动新的**模型对话**，而不是要求重启宿主运行时；上一轮的模型 transcript、工具输出和未提交推理不会带入新的模型对话。它既不是宿主运行时重启要求，也不是工作区重置：同一 `loopId`、逻辑 session 和当前已修改工作区继续；宿主进程若保持存活，可以继续复用 MCP 连接和工具进程，并保持已安装 skill 文件可用。LoopForge 不管理 provider 的 prompt/KV cache 或模型的隐式习惯；需要跨对话保留的内容必须来自 prompt 的已提交投影，投影之外的宿主侧状态只是宿主的显式配置，不是 LoopForge 的事实。它用于第一轮、正常下一轮、recovery redo、rejection escalation 和 invocation recovery，并且可能仍是**同一个逻辑轮**；只有 rollback/recovery 才恢复检查点。`same_round_retry` 表示原上下文修复，继续原 invocation 并注入失败原因与发现。`rejection_escalation` 表示重开模型对话的重试，失败经验仍随提示携带。如果收到 in-context retry prompt 的 invocation 已不存在，调用 `loopforge_resume(loopId, invocationLost: true)`：LoopForge 会把**同一轮、同一 attempt** 重新编译为 L2 的 `fresh_invocation` / `invocation_recovery`，携带 Machine Evidence、有界 Working Memory 与拒绝教训。
 
-提示密度与上下文边界相互独立，应读取返回的 `contextMode`、`contextReason` 和策略标签，而不是根据 L0、L1、L2 推断是否重开上下文。干净上下文不是工作区重置：当前已修改的工作区与 loop 身份继续；只有 rollback/recovery 才恢复检查点。
+提示密度与上下文边界相互独立，应读取返回的 `contextMode`、`contextReason` 和策略标签，而不是根据 L0、L1、L2 推断是否重开上下文。干净上下文不是工作区重置：当前已修改的工作区与 loop 身份继续；只有 rollback/recovery 才恢复检查点。MCP 传输把稳定内容（`initialize` 返回的 `instructions`、`tools/list` schema、已安装的 skill 文件）与每轮动态内容（轮次 `prompt`、`submission_guidance`、`submissionHandle`）分开；动态 prompt 是已提交状态的投影，不是上一轮对话的摘要。宿主适配器因此可以让稳定环境保持热启动，同时为每个 `fresh_invocation` 轮次开启新的模型对话。常驻运行时不得把会影响执行结果的可变状态（例如 shell 变量或 REPL 中间值）带入新轮次；适配器负责隔离或重置这类状态。
 
 `loopforge_next` 和 `loopforge_resume` 接受可选的 `currentUserInstruction`。它是本次 invocation 的宿主输入，不会改写 loop 的 task、objective、验收标准、约束或 Round Contract；不传时 prompt 会明确写“本次未提供”，不会从旧文本推断。
 

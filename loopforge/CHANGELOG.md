@@ -1,5 +1,51 @@
 # Changelog
 
+## 4.0.7 (2026-11-11)
+
+**The invocation-boundary clarification release.** This release changes no
+protocol shape, prompt text, artifact field or runtime behavior. It states one
+contract explicitly: `fresh_invocation` starts a clean model conversation, not
+a new host runtime, and LoopForge does not manage provider caches or implicit
+model habits.
+
+Schema versions: all unchanged — `PROMPT_ARTIFACT_SCHEMA_VERSION` 12,
+`ROUND_TRANSACTION_SCHEMA_VERSION` 9, `CANONICAL_STATE_SCHEMA_VERSION` 10,
+`POLICY_SCHEMA_VERSION` "10", `CHECKPOINT_SCHEMA_VERSION` 1,
+`GIT_OBSERVATION_SCHEMA_VERSION` 2.
+
+### Model conversation vs. host runtime
+
+- New `HOST_INVOCATION_CONTRACT` in `src/round-guidance.ts`, the ONE runtime
+  prose source. It states what is cleared (previous model transcript, tool
+  outputs, uncommitted reasoning), what is kept (same `loopId`, logical session
+  and workspace; a live host may keep the MCP connection, tool processes and
+  installed skill files available), and what LoopForge does not manage
+  (provider prompt/KV caches, implicit model habits). Host-side state outside
+  the committed projection is explicit host configuration, not a LoopForge
+  fact.
+- The contract is composed into `CONTEXT_CONTINUITY_RULES` and therefore into
+  the `initialize` instructions. The per-round prompt footer is unchanged, so
+  prompt hashes and artifacts do not change for identical inputs.
+- New `CONTEXT_MODE_DESCRIPTION` is the ONE `tools/list` description for
+  `contextMode`; `loopforge_start`, `loopforge_next` and `loopforge_resume`
+  share it. It names the model-conversation/host-runtime distinction, every
+  legal `fresh_invocation` reason (`first_round`, `next_round`,
+  `recovery_redo`, `rejection_escalation`, `invocation_recovery`) and the
+  `same_round_retry` / `enforcement_retry` pair.
+
+### Surfaces
+
+- `PromptContextMode` and `PromptArtifact.contextMode` comments in
+  `src/protocol.ts` carry the same contract. The generated
+  `loopforge-protocol.json` enum shape is unchanged.
+- The Forge skill remains a pointer manual and names the stable/dynamic MCP
+  split without restating executable sizing or submission rules.
+- The three READMEs name the stable content (`initialize` instructions,
+  `tools/list` schemas, installed skill files) and the dynamic per-response
+  content (`prompt`, `submission_guidance`, `submissionHandle`), so a host
+  adapter can keep the stable environment warm while starting a clean model
+  conversation per round.
+
 ## 4.0.6 (2026-11-05)
 
 **The contract-coverage / objective-evolution / model-surface release.** This

@@ -6,6 +6,10 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import {
+  CONTEXT_MODE_DESCRIPTION,
+  HOST_INVOCATION_CONTRACT,
+} from "../round-guidance.js";
 
 interface RpcResponse {
   id?: string | number | null;
@@ -256,9 +260,27 @@ describe("MCP stdio input boundary", () => {
       const initResult = initialized.result as Record<string, unknown>;
       assert.equal(initResult.protocolVersion, "2025-06-18");
       assert.equal((initResult.capabilities as Record<string, unknown>).tasks, undefined);
+      const instructions = initResult.instructions as string;
+      assert.ok(instructions.includes(HOST_INVOCATION_CONTRACT),
+        "initialize instructions carry the shared host invocation contract");
+      assert.match(instructions, /model conversation/);
+      assert.match(instructions, /not a new host or tool runtime/);
+      assert.match(instructions, /warm runtime is not model memory/);
 
       const listed = await rpc.request("tools/list");
       const tools = ((listed.result as Record<string, unknown>).tools as Array<Record<string, unknown>>);
+      const nextTool = tools.find((tool) => tool.name === "loopforge_next");
+      assert.ok(nextTool, "loopforge_next must be advertised");
+      const nextOutput = nextTool.outputSchema as Record<string, unknown>;
+      const contextMode = (nextOutput.properties as Record<string, unknown>)
+        .contextMode as Record<string, unknown>;
+      assert.deepEqual(contextMode.enum, ["fresh_invocation", "same_round_retry"]);
+      assert.equal(contextMode.description, CONTEXT_MODE_DESCRIPTION,
+        "tools/list must use the one shared contextMode description");
+      assert.match(String(contextMode.description), /first_round/);
+      assert.match(String(contextMode.description), /recovery_redo/);
+      assert.match(String(contextMode.description), /provider prompt\/KV caches/);
+      assert.match(String(contextMode.description), /implicit model habits/);
       // v3.7.1: the gate tools are opt-in — hidden by default.
       const gate = tools.find((tool) => tool.name === "loopforge_gate_check");
       assert.equal(gate, undefined, "gate tools are hidden when policy.gate.enabled=false");

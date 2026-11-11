@@ -7,9 +7,11 @@
  *  artifact instead of re-deriving it.
  *
  *  Strategy (see `round-guidance.ts` for the prose):
- *  - `fresh_invocation` = clean context. It may be the SAME logical round
- *    (rejection escalation or a recovered retry) or the next logical round.
- *    It never resets the workspace.
+ *  - `fresh_invocation` = clean model conversation, not a host-runtime
+ *    restart. It may be the SAME logical round (rejection escalation or a
+ *    recovered retry) or the next logical round. It never resets the
+ *    workspace; a live host may keep its MCP connection, tool processes and
+ *    installed skill files warm.
  *  - `same_round_retry` = in-context repair while the rejection streak is
  *    below the escalation threshold.
  *  - A repeated same-check rejection explicitly escalates to a clean context;

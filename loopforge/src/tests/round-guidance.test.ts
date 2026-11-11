@@ -9,6 +9,8 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import {
   CONTEXT_CONTINUITY_RULES,
+  CONTEXT_MODE_DESCRIPTION,
+  HOST_INVOCATION_CONTRACT,
   ROUND_BOUNDARY_NON_BOUNDARIES,
   ROUND_BOUNDARY_PRINCIPLE,
   ROUND_BOUNDARY_SIZING,
@@ -45,6 +47,55 @@ describe("v4.0.4 — runtime round guidance", () => {
       `fresh prompt guidance must stay <= 480 chars, got ${prompt.length}`);
     assert.ok(!prompt.includes(CONTEXT_CONTINUITY_RULES),
       "the host-only continuity contract is not repeated in the prompt");
+    assert.ok(CONTEXT_CONTINUITY_RULES.includes(HOST_INVOCATION_CONTRACT),
+      "the server continuity contract composes the host invocation contract");
+    assert.ok(renderRoundGuidance("server").includes(HOST_INVOCATION_CONTRACT),
+      "the server density carries the host invocation contract");
+    assert.ok(!prompt.includes(HOST_INVOCATION_CONTRACT),
+      "the host-only contract is not repeated in the per-round prompt");
+    assert.ok(!CONTEXT_CONTINUITY_RULES.includes(
+      "carry only the prompt, loopId, session",
+    ), "the ambiguous carry-only sentence is gone");
+  });
+
+  it("the host contract separates cleared conversation, kept runtime and unmanaged state", () => {
+    for (const phrase of [
+      "model conversation",
+      "previous model transcript",
+      "uncommitted reasoning",
+      "logical session",
+      "MCP connection",
+      "tool processes",
+      "installed skill files",
+      "provider prompt/KV caches",
+      "implicit model habits",
+      "explicit host configuration",
+    ]) {
+      assert.ok(HOST_INVOCATION_CONTRACT.includes(phrase),
+        `host contract must state: ${phrase}`);
+    }
+    assert.ok(!/LoopForge clears/i.test(HOST_INVOCATION_CONTRACT),
+      "the contract never claims LoopForge clears provider caches");
+    assert.match(HOST_INVOCATION_CONTRACT, /not a LoopForge fact/);
+  });
+
+  it("the contextMode description names every legal reason", () => {
+    for (const reason of [
+      "first_round",
+      "next_round",
+      "recovery_redo",
+      "rejection_escalation",
+      "invocation_recovery",
+      "enforcement_retry",
+    ]) {
+      assert.ok(CONTEXT_MODE_DESCRIPTION.includes(reason),
+        `contextMode description must name: ${reason}`);
+    }
+    assert.ok(!CONTEXT_MODE_DESCRIPTION.includes(
+      "fresh_invocation starts clean context at rejection escalation",
+    ));
+    assert.match(CONTEXT_MODE_DESCRIPTION, /model conversation/);
+    assert.match(CONTEXT_MODE_DESCRIPTION, /host runtime/);
   });
 
   it("renders the short retry form only for an in-context retry", () => {
@@ -186,6 +237,14 @@ describe("v4.0.4 — the skill points at the runtime rules", () => {
     ]) {
       assert.ok(!skill.includes(removed), `skill must not restate: ${removed}`);
     }
+    assert.ok(skill.includes("model conversation"),
+      "the skill defines clean context as a model conversation");
+    assert.ok(skill.includes("host-runtime restart requirement"),
+      "the skill states clean context is not a host restart");
+    assert.ok(skill.includes("`initialize`") && skill.includes("`tools/list`"),
+      "the skill names the stable MCP channel");
+    assert.ok(!skill.includes("carry only the prompt, loopId, session"),
+      "the skill must not keep the ambiguous carry-only sentence");
   });
 
   it("the skill's context examples are legal under the current boundary contract", () => {

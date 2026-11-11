@@ -21,8 +21,10 @@ import {
 } from "../mcp/tools.js";
 import {
   PROMPT_ARTIFACT_SCHEMA_VERSION,
+  PROMPT_CONTEXT_MODES,
   PROMPT_CONTEXT_REASONS,
 } from "../protocol.js";
+import { CONTEXT_MODE_DESCRIPTION } from "../round-guidance.js";
 import { ROUND_TRANSACTION_SCHEMA_VERSION } from "../round-transaction.js";
 import { CANONICAL_STATE_SCHEMA_VERSION } from "../canonical-state.js";
 import { POLICY_SCHEMA_VERSION } from "../policy.js";
@@ -241,5 +243,30 @@ describe("MCP schema ↔ protocol schema sync", () => {
     assert.ok("outcome" in selfEvalProps);
     assert.ok(!("success" in selfEvalProps));
     assert.ok(!("agent_stop_reason" in selfEvalProps));
+  });
+
+  it("v4.0.7: the tools/list contextMode description is the one shared source", () => {
+    for (const tool of [
+      "loopforge_start",
+      "loopforge_next",
+      "loopforge_resume",
+    ]) {
+      const output = TOOL_OUTPUT_SCHEMAS[tool] as SchemaNode;
+      const props = output.properties as SchemaNode;
+      const contextMode = props.contextMode as SchemaNode;
+      assert.equal(contextMode.description, CONTEXT_MODE_DESCRIPTION,
+        `${tool} contextMode description must be the shared constant`);
+      assert.deepEqual(
+        [...(contextMode.enum as string[])].sort(),
+        [...PROMPT_CONTEXT_MODES].sort(),
+        `${tool} contextMode enum must match the runtime whitelist`,
+      );
+      for (const reason of PROMPT_CONTEXT_REASONS) {
+        assert.ok(
+          (contextMode.description as string).includes(reason),
+          `${tool} contextMode description must name ${reason}`,
+        );
+      }
+    }
   });
 });

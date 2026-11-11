@@ -96,31 +96,45 @@ Context: in-context repair (same_round_retry; enforcement_retry; continue origin
 Context: clean context after restore (fresh_invocation; recovery_redo; lessons carried)
 ```
 
-- **clean context** (`fresh_invocation`): start a NEW Agent invocation with only
-  this prompt, the `loopId`, `sessionId`, and `submissionHandle`. Do not carry
-  the previous transcript, tool logs, or uncommitted reasoning. It is not a
-  workspace reset: committed files, git state, and the session continue. It may
-  be the next logical round, the first round, a recovery redo, or the SAME
-  logical round on a `rejection_escalation` retry.
+- **clean context** (`fresh_invocation`): start a new **model conversation**
+  with the returned prompt, `loopId`, `sessionId` and `submissionHandle`; do
+  not carry the previous model transcript, tool outputs or uncommitted
+  reasoning. It is not a host-runtime restart requirement and not a workspace
+  reset: committed files, git state, the same loop/session identity and the
+  current modified workspace continue, and a host process that stays alive may
+  keep the MCP connection and tool processes warm and the installed skill files
+  available. LoopForge does not manage provider prompt/KV caches or implicit
+  model habits; facts that must survive belong in the prompt's committed
+  projection, and host-side state outside it is explicit host configuration,
+  not a LoopForge fact. It may be the next logical round, the first round, a
+  recovery redo, or the SAME logical round on a `rejection_escalation` retry.
 - **in-context repair** (`same_round_retry`, `enforcement_retry`): a retry in
   the original context, independent of prompt density.
   Continue the current invocation if it exists; the rejection notice, findings
   and failure reason are injected. If it is gone, call
   `loopforge_resume(loopId, invocationLost: true)`: LoopForge recompiles the
   SAME round and attempt as `fresh_invocation / invocation_recovery` at L2.
-  Never start a new invocation from the in-context retry prompt.
+  Never start a new model conversation from the in-context retry prompt.
 - **invocation recovery** (`fresh_invocation`, `invocation_recovery`): the
   original retry invocation is gone. LoopForge already recompiled the same
   round/attempt with the rejection notice, findings, previous Machine
   Evidence, bounded Working Memory and the rejected attempt's transient
   posture. Inspect the current workspace; the posture is not a snapshot of it.
 - **clean context repair** (`fresh_invocation`, `rejection_escalation`): start a
-  new invocation; the retry notice, findings, transient rejected posture and
-  committed memory are already
-  in the prompt.
+  new model conversation; the retry notice, findings, transient rejected
+  posture and committed memory are already in the prompt.
 - **clean context after restore**: recovery redo. LoopForge has already restored
   and verified the workspace; the Recovery Brief and failure lessons are in the
   prompt. Never continue the abandoned transcript.
+
+The MCP transport separates stable content from dynamic content. The
+`initialize` result's `instructions`, the `tools/list` schemas and the installed
+skill files are stable for a given server build and policy; the per-response
+`prompt`, `submission_guidance` and `submissionHandle` are dynamic. The dynamic
+prompt is a projection of committed state, not a summary of the previous
+conversation. A host adapter can keep the stable environment warm while
+starting a clean model conversation per round. This manual does not restate the
+executable rules.
 
 Read `contextMode`, `contextReason` and the strategy label together; L0/L1/L2
 select density and do not determine the invocation boundary.
@@ -329,7 +343,8 @@ is never a later prompt's independent fact source.
 - `enforcementAction: "reject"`: retry the same logical round with the
   **new** handle; the attempt increases. Follow the returned context strategy:
   `same_round_retry` keeps the original invocation; `fresh_invocation` with
-  `rejection_escalation` starts a clean invocation for the same logical round;
+  `rejection_escalation` starts a clean model conversation for the same
+  logical round;
   `invocation_recovery` is the cold replacement of a lost in-context retry for
   the same round/attempt. Prompt density does not choose between them. The old
   handle only returns the current retry prompt with a warning. A retry prompt

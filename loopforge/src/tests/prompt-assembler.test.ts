@@ -19,6 +19,7 @@ import { deriveConfiguredCapability, getPolicy, resetPolicy, setPolicyForTest, D
 // modules must respect the prompt-assembler ← verification-gate cycle rule.)
 import * as verificationGate from "../verification-gate.js";
 import {
+  HOST_INVOCATION_CONTRACT,
   ROUND_BOUNDARY_PRINCIPLE,
   renderRoundGuidance,
 } from "../round-guidance.js";
@@ -778,6 +779,8 @@ describe("v4.0.4 — round guidance in the fixed footer", () => {
     assert.ok(artifact.renderedPrompt.includes("current modified workspace"));
     assert.ok(artifact.renderedPrompt.includes("previous transcript"));
     assert.ok(artifact.renderedPrompt.includes("uncommitted reasoning"));
+    assert.ok(!artifact.renderedPrompt.includes(HOST_INVOCATION_CONTRACT),
+      "the host-only invocation contract stays out of the per-round prompt");
   });
 
   it("a same-round retry renders the short guidance and in-context label", () => {

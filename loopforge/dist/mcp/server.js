@@ -102,11 +102,13 @@ export const SERVER_INSTRUCTIONS = [
     "legal shapes, real ids, and usable commands. Use only ids it or the prompt ",
     "rendered, never invent an id. Submission_guidance is a projection of current ",
     "facts, not state. ",
-    // v4.0.4: the host execution contract and round-boundary rules come from
-    // the ONE runtime guidance module. The prompt header label names the
-    // strategy (`clean context`, `clean context repair`, `in-context repair`,
-    // `clean context after restore`); the host must honor it. A re-delivered
-    // held prompt is not a new boundary.
+    // v4.0.4 / v4.0.7: the host execution contract and round-boundary rules
+    // come from the ONE runtime guidance module. `initialize.instructions` is
+    // the stable channel (one per connection); per-round facts stay in the
+    // prompt, `submission_guidance` and the submissionHandle. The prompt header
+    // label names the strategy (`clean context`, `clean context repair`,
+    // `in-context repair`, `clean context after restore`); the host must honor
+    // it. A re-delivered held prompt is not a new boundary.
     renderRoundGuidance("server"), " ",
     "Each submission returns `submission_receipt`, which separates reports that were ",
     "saved, derived state that actually changed, and machine verification results. ",

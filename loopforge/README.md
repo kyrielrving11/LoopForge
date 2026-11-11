@@ -63,18 +63,49 @@ both. Invalid core fields can be corrected for the same round without
 committing that attempt.
 
 Every returned prompt declares its derived context strategy in the header.
-`fresh_invocation` is clean context: a new Agent invocation without the previous
-transcript, used for the first round, the next round, recovery redo, or repeated
-same-check rejection escalation. It may describe the SAME logical round.
-`same_round_retry` (in-context repair) continues the original invocation with
-the failure lessons injected. If that invocation is gone, call
+`fresh_invocation` is clean context: the host starts a new model conversation,
+so the previous model transcript, tool outputs and uncommitted reasoning are
+not carried. It is not a host-runtime restart requirement and not a workspace
+reset: the same `loopId`, logical session and current modified workspace
+continue, and a host process that stays alive may keep the MCP connection and
+tool processes warm and the installed skill files available. LoopForge does not
+manage provider prompt/KV caches or implicit Agent habits; continuity that must
+survive belongs in the prompt's committed projection, and host-side state
+outside it is explicit host configuration, not a LoopForge fact.
+`fresh_invocation` is used for the first round, the next round, recovery redo,
+rejection escalation and invocation recovery, and may describe the SAME logical
+round. `same_round_retry` (in-context repair) continues the original invocation
+with the failure lessons injected. If that invocation is gone, call
 `loopforge_resume` with `invocationLost: true`: LoopForge recompiles the SAME
 round and attempt as `fresh_invocation` / `invocation_recovery` at L2, with
 Machine Evidence, bounded Working Memory and the rejection lessons. Prompt
 density and context boundary are independent; use the returned `contextMode`
-and `contextReason` at any L0/L1/L2 density. Clean context is not a workspace
-reset: the current modified workspace and the loop identity continue; only
-recovery restores a checkpoint.
+and `contextReason` at any L0/L1/L2 density. Only recovery restores a
+checkpoint.
+
+### Host invocation contract
+
+A clean context is a model-conversation boundary, not a host restart. The host
+may keep its MCP connection, tool processes, installed skill files and modified
+workspace warm across invocations; it must start a clean model conversation and
+must not carry the previous transcript, tool logs or uncommitted reasoning into
+it. A warm runtime is not model memory: the new conversation knows only what
+the prompt and the host's stable environment provide. LoopForge does not manage
+provider prompt/KV caches or infer Agent habits; only committed facts and the
+bounded projections LoopForge returns are guaranteed. Anything else that must
+survive belongs to explicit host configuration.
+
+### Stable environment vs per-round payload
+
+An adapter can treat the MCP `initialize` result's `instructions`, the
+`tools/list` schemas and the installed skill files as the stable environment,
+and each `loopforge_start` / `loopforge_next` / `loopforge_resume` prompt plus
+`submission_guidance` and `submissionHandle` as the per-round payload. Reuse the
+stable environment while the LoopForge version, tool list and policy are
+unchanged; refresh it when they change. A kept-warm runtime must not carry
+execution-affecting mutable state (for example shell variables or REPL values)
+into a new round; the adapter isolates or resets that state. A cache miss must
+never change round governance.
 
 `loopforge_next` and `loopforge_resume` accept an optional
 `currentUserInstruction`. It is host input for that invocation and never

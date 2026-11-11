@@ -71,11 +71,11 @@ and blobs hold only what HEAD cannot reproduce.
 ## Prompt levels
 
 L0, L1, and L2 select prompt density only; they never control which evaluation
-fields you may use. Each density can accompany a clean-context invocation or
-an in-context retry; read `contextMode` and `contextReason`. The runtime
-selection rules and the context boundary live in the prompt's `## Round Boundary` section, its
-context-strategy label, and the MCP server instructions; this reference does not
-restate them.
+fields you may use. Each density can accompany a clean-context model
+conversation or an in-context retry; read `contextMode` and `contextReason`.
+The runtime selection rules and the context boundary live in the prompt's
+`## Round Boundary` section, its context-strategy label, and the MCP server
+instructions; this reference does not restate them.
 
 The optional `currentUserInstruction` on `loopforge_next` / `loopforge_resume`
 is invocation input: it is rendered in the prompt and recorded in that prompt's

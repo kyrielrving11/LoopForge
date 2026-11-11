@@ -55,21 +55,37 @@ observation is unavailable, LoopForge preserves that uncertainty instead of
 treating it as a pass or as an empty change set.
 
 Each prompt carries a derived context strategy. `fresh_invocation` is clean
-context: the host starts a new Agent invocation, so the previous transcript,
-tool logs and uncommitted reasoning do not leak into the next round. It is used
-for the first round, a normal next round, a recovery redo, or repeated
-same-check rejection escalation, and it may describe the SAME logical round. Clean
-context is not a workspace reset; only rollback/recovery restores a checkpoint.
-`same_round_retry` is in-context repair: it continues the
-original invocation and injects the rejection notice, findings and failure
-reason. A `rejection_escalation` retry is clean-context repair: a new invocation
-that still carries those failure lessons. If the invocation that received an
-in-context retry prompt is gone, call `loopforge_resume` with
-`invocationLost: true`; LoopForge recompiles the SAME round and attempt as
-`fresh_invocation` / `invocation_recovery` at L2, with Machine Evidence,
-bounded Working Memory and the rejection lessons. Prompt density and context
-boundary are independent; follow the returned `contextMode` and
-`contextReason`, rather than inferring the boundary from L0, L1, or L2.
+context: the host starts a new model conversation, so the previous model
+transcript, tool outputs and uncommitted reasoning do not leak into the next
+round. It is not a host-runtime restart requirement and not a workspace reset:
+the same `loopId`, logical session and current modified workspace continue, and
+a host process that stays alive may keep the MCP connection and tool processes
+warm and the installed skill files available. LoopForge does not manage
+provider prompt/KV caches or implicit Agent habits; anything that must survive
+belongs in the prompt's committed projection, and host-side state outside it is
+explicit host configuration, not a LoopForge fact. `fresh_invocation` is used
+for the first round, a normal next round, a recovery redo, rejection escalation
+and invocation recovery, and it may describe the SAME logical round. Only
+rollback/recovery restores a checkpoint. `same_round_retry` is in-context
+repair: it continues the original invocation and injects the rejection notice,
+findings and failure reason. A `rejection_escalation` retry is clean-context
+repair: a new model conversation that still carries those failure lessons. If
+the invocation that received an in-context retry prompt is gone, call
+`loopforge_resume` with `invocationLost: true`; LoopForge recompiles the SAME
+round and attempt as `fresh_invocation` / `invocation_recovery` at L2, with
+Machine Evidence, bounded Working Memory and the rejection lessons. Prompt
+density and context boundary are independent; follow the returned
+`contextMode` and `contextReason`, rather than inferring the boundary from L0,
+L1, or L2.
+
+The MCP transport separates stable content from dynamic content. The
+`initialize` result's `instructions`, the `tools/list` schemas and the installed
+skill files are stable for a given server build, policy and installed package
+version; the per-response `prompt`, `submission_guidance` and
+`submissionHandle` are dynamic. The dynamic prompt is a projection of committed
+state, not a summary of the previous conversation. A host adapter can therefore
+keep the stable environment warm while starting a clean model conversation for
+each `fresh_invocation` round.
 
 `loopforge_next` and `loopforge_resume` accept an optional
 `currentUserInstruction`. It is host input for that invocation and never

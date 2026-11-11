@@ -30,6 +30,7 @@ import {
   fieldGuideDescription,
 } from "../submission-guidance.js";
 import { LOST_HANDLE_ROUTING } from "../recovery-guidance.js";
+import { CONTEXT_MODE_DESCRIPTION } from "../round-guidance.js";
 import { SessionLeaseConflictError } from "../storage.js";
 import { ReplayWindowError } from "../replay.js";
 import type { ReplayPage } from "../replay.js";
@@ -755,12 +756,7 @@ const ADVANCE_OUTPUT_SCHEMA: JsonSchema = {
     level: { type: ["string", "null"] },
     contextMode: {
       enum: ["fresh_invocation", "same_round_retry"],
-      description:
-        "The context boundary the returned prompt was compiled under. " +
-        "Prompt density does not determine it: same_round_retry continues the " +
-        "invocation below the repeated same-check rejection threshold; " +
-        "fresh_invocation starts clean context at rejection escalation. " +
-        "Projected from the PromptArtifact.",
+      description: CONTEXT_MODE_DESCRIPTION,
     },
     contextReason: {
       // v4.0.5: the ONE runtime whitelist; a new reason cannot drift between

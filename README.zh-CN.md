@@ -1,68 +1,72 @@
 # LoopForge
 
-**为编码 Agent 提供持久化的轮次运行保障。**
+**为多轮编码 Agent 提供持久的工作连续性与机器证据。**
 
-编码 Agent 能够推理并修改代码。跨越多轮的工作还需要持续性：哪些结果已经接受、配置的检查观察到了什么，以及工作可以从哪里可靠地继续。LoopForge 为 Agent 的工作提供这层连续性。
+编码 Agent 可以快速推进工作。难的是让进展跨轮次保持可靠：对话可能被压缩、中断或重启，而已接受的工作、被拒绝的尝试、机器观察和后来放弃的修改容易混在一起。
 
-LoopForge 记录被接受的轮次，保存机器观察，并依据已提交状态准备下一轮 prompt。任务仍由 Agent 主导：它理解需求、选择方案、修改工作区，也决定何时请求恢复。LoopForge 让已提交结果持久可查，并检查轮次边界。
+LoopForge 为每轮工作设立持久边界。它记录哪些结果已经提交，将机器观察与对应记录保存在一起，并依据由此形成的状态准备下一次模型调用所需的 prompt。任务的含义和实现方式仍由 Agent 决定；LoopForge 让围绕工作的过程可追溯、可恢复。
 
 [English](./README.md) · [安装与集成手册](./loopforge/README.md)
 
-## 为什么需要 LoopForge
+## 要解决的问题
 
-Agent 的对话不是可靠的事务记录。里面可能混有尚未提交的工作、被拒绝的尝试，或后来已经放弃的修改。仅依赖对话摘要，容易模糊哪些工作已经提交、哪些仍不确定。
+一项长期编码任务不是一次连续操作，而是一系列工作切片、决策、检查，有时还包括方向调整。对话历史有参考价值，却不是可靠的过程记录：其中可能混有尚未提交的工作、被拒绝的尝试、未获检查支持的声明，以及后来已经放弃的修改。
 
-LoopForge 为每轮工作记录持久结果。被接受的工作成为类型化的已提交历史，被拒绝的尝试不会进入历史。机器观察与轮次一起保存，后续处理可以区分 Agent 的报告和配置检查实际观察到的内容。下一轮 prompt 从已提交事实派生，不需要在旁边再维护一套进度叙述。
+LoopForge 将每个被接受的轮次作为类型化历史中的一笔事务。下一轮依据已提交状态准备，而不是从非正式摘要中推断。观察不确定时，这种不确定性会被保留，不会被误当成通过或没有变化。
 
-## 它如何工作
+## 一轮如何运作
 
 ```text
-LoopForge 准备当前已提交上下文
-              |
-              v
-Agent 选择并执行工作
-              |
-              v
-Agent 提交结果，或请求恢复
-              |
-              v
-LoopForge 记录观察并应用轮次规则
-              |
-       提交、拒绝或恢复
-              |
-              v
-从新的已提交状态准备下一轮 prompt
+LoopForge 根据已提交状态准备 prompt
+                       |
+                       v
+Agent 理解任务并完成一个工作切片
+                       |
+                       v
+Agent 提交结构化结果或请求恢复
+                       |
+                       v
+LoopForge 收集观察、校验，并提交或拒绝
+                       |
+                       v
+根据新的已提交状态准备下一轮 prompt
 ```
 
-Agent 报告描述它认为发生了什么，但报告本身不是证明。LoopForge 将报告与可用观察对照，例如 Git 工作区变化和明确配置的验证命令。观察不可用时，LoopForge 保留未知状态，不会将它当成通过或空变更。
+一个轮次是具有前后证据边界的一段完整工作。Agent 判断这段工作是否完成，以及是否继续。被拒绝的尝试不会进入已提交轮次历史；无效提交不会推进轮次；被接受的结果与对应观察一起记录。
 
-每个 prompt 都带有派生出的上下文策略。`fresh_invocation` 表示干净上下文：宿主启动新的**模型对话**，而不是要求重启宿主运行时；上一轮的模型 transcript、工具输出和未提交推理不会带入新的模型对话。它既不是宿主运行时重启要求，也不是工作区重置：同一 `loopId`、逻辑 session 和当前已修改工作区继续；宿主进程若保持存活，可以继续复用 MCP 连接和工具进程，并保持已安装 skill 文件可用。LoopForge 不管理 provider 的 prompt/KV cache 或模型的隐式习惯；需要跨对话保留的内容必须来自 prompt 的已提交投影，投影之外的宿主侧状态只是宿主的显式配置，不是 LoopForge 的事实。它用于第一轮、正常下一轮、recovery redo、rejection escalation 和 invocation recovery，并且可能仍是**同一个逻辑轮**；只有 rollback/recovery 才恢复检查点。`same_round_retry` 表示原上下文修复，继续原 invocation 并注入失败原因与发现。`rejection_escalation` 表示重开模型对话的重试，失败经验仍随提示携带。如果收到 in-context retry prompt 的 invocation 已不存在，调用 `loopforge_resume(loopId, invocationLost: true)`：LoopForge 会把**同一轮、同一 attempt** 重新编译为 L2 的 `fresh_invocation` / `invocation_recovery`，携带 Machine Evidence、有界 Working Memory 与拒绝教训。
+例如，Agent 分多个切片实现一项功能时，每个被接受的切片都会留下类型化记录，以及同一边界上的机器观察。下一次模型对话从已提交状态开始，而不是沿用旧 transcript。如果 Agent 决定放弃当前方案，可以请求恢复；LoopForge 会先验证目标工作区，再让工作继续。
 
-提示密度与上下文边界相互独立，应读取返回的 `contextMode`、`contextReason` 和策略标签，而不是根据 L0、L1、L2 推断是否重开上下文。干净上下文不是工作区重置：当前已修改的工作区与 loop 身份继续；只有 rollback/recovery 才恢复检查点。MCP 传输把稳定内容（`initialize` 返回的 `instructions`、`tools/list` schema、已安装的 skill 文件）与每轮动态内容（轮次 `prompt`、`submission_guidance`、`submissionHandle`）分开；动态 prompt 是已提交状态的投影，不是上一轮对话的摘要。宿主适配器因此可以让稳定环境保持热启动，同时为每个 `fresh_invocation` 轮次开启新的模型对话。常驻运行时不得把会影响执行结果的可变状态（例如 shell 变量或 REPL 中间值）带入新轮次；适配器负责隔离或重置这类状态。
+## LoopForge 的设计特点
 
-`loopforge_next` 和 `loopforge_resume` 接受可选的 `currentUserInstruction`。它是本次 invocation 的宿主输入，不会改写 loop 的 task、objective、验收标准、约束或 Round Contract；不传时 prompt 会明确写“本次未提供”，不会从旧文本推断。
+### 持久轮次，而非对话摘要
 
-轮次结果把三类事实分开呈现：Agent 报告（`success_claim`、`outcome`、`blocker`）、LoopForge 处置（`loop_stop_reason`）和持久化的 Machine evidence。`outcome` 是唯一的回合结论；`success` 必须停止，`blocked` 必须停止并提供 `blocker`。Explain、终态 `stopDetail` 以及 `resume` 已停止 loop 使用同一组事实块；`completed` 表示 Agent 的停止声明通过了 gate，不代表机器背书的任务成功。
+LoopForge 将已提交轮次保存为 Vault 中的类型化记录。这些记录是 prompt 和只读视图的事实来源。state file、receipt、replay、audit 和 explain 都是从历史派生的视图，不是并行账本。因此，已接受的工作可以与被拒绝或后来放弃的尝试区分开来。
 
-连续性可以由有界 Working Memory 补充。它只从当前分支的已提交轮次和 rollback directive 派生，包含近期报告、被证伪的假设与撤回、未闭合问题、已消费的恢复事件和契约转向。来源窗口与各类条目上限是固定代码常量，不由 policy 配置。L1 和 L2 使用相同的固定窗口，L0 保持紧凑。默认 prompt 字符上限分别为 L0 5,000、L1 50,000、L2 100,000。这些是安全上限，不是日常裁剪记忆的目标。Working Memory 是一个不可拆分的可选段落；提示空间不足时会整体省略，prompt artifact 会记录省略状态和计数。它由唯一 canonical 认知状态派生，不是第二套历史或独立 memory store，Agent 报告也不会进入验证 gate。Machine Evidence（provider、command 状态和已验证契约项）单独作为受保护段落呈现，并参与验证判断。更早历史通过 `loopforge_replay` 或 `loopforge_status view: "explain"` 主动检索。
+### Agent 报告与机器证据分开
 
-对于适合有界分片的工作，Agent 可以提出 Round Contract：一个交付物、验收条件，以及用于检查这些条件的命令。LoopForge 校验契约结构和命令绑定。只有 Agent 声明条目满足，且关闭轮次中的绑定命令在声明的 binding 下通过，条目才会标记为已验证。之后命令被 disable 或 reconfigure 不会重写历史通过结论；只有命令观察才是测试事实，不存在 Agent 自报的测试计数。交付物或测试在语义上是否合适，仍由 Agent 和操作者判断。只要配置了 after-capable 命令，继续轮必须为下一轮留下活动合同：省略提案表示继续当前合同，声明新提案表示开始下一分片，也可以用 `round_contract.supersedes` 显式替换。旧契约以 `superseded` 关闭并继续保留在审计记录中。Agent 声明的 `scope` 只是报告用的意图，不是权限，也不参与合同身份。
+Agent 报告自己认为完成了什么；LoopForge 将这些内容作为声明保存。Git 工作区观察和明确配置的验证命令提供机器可见的证据。声明本身不能验证结果；观察不可用时，状态仍是未知。证据状态在提交时派生一次，之后由 prompt、receipt 和只读视图共同读取。
 
-criterion 与 contract item 的声明共用一个 `execution_report.claims` 通道：条目引用 `cr-` criterion id（advisory）或当前活动合同的 `rci-` item id（strict）。claim 本身永远不能把任何东西变成已验证。整体工作目标可以通过事件驱动的 `objective_refinement` 演进；它只改变下一轮 prompt 和 goalId 使用的工作目标文本，永远不改 Operator Acceptance、成功标准或硬约束。目标没有变化时省略该字段。
+适合分片的工作可以使用 Round Contract：由 Agent 提出一个交付物、验收条件和用于检查的已配置命令。LoopForge 校验契约结构和命令绑定；交付物及检查方式在语义上是否合适，仍由 Agent 和操作者判断。
 
-## 由 Agent 主导的恢复
+当有效的成功声明由 after 阶段通过、且入口与配置未被篡改的命令支持时，verification gate 会将 `machineBackedSuccess` 持久化在该轮的证据状态中。只读视图直接读取这一事实，不会重新推导。`completed` 只表示 Agent 的停止声明通过了已配置的 gate，并不普遍证明任务正确。
 
-Agent 可能意识到当前方向不合适，并请求恢复到工作区检查点：轮次准备时自动采集的 before-image，或通过 `loopforge_checkpoint` 显式创建的中途保存点。LoopForge 不替它诊断错误，也不替它选择恢复目标。它通过当前分支的事务引用解析检查点，持久记录回滚事件，然后自己执行文件与 HEAD 还原，并按 manifest 的完整 Git 边界和记录的 HEAD 精确验证；验证通过后才发出 redo prompt。
+### 每个新轮次开启新的模型对话
 
-如果机器规则要求回退，LoopForge 也可以触发 backtrack。两种路径使用同一套恢复协议，并都会保留在历史中。Redo 在子分支上继续。rollback directive 会保留被放弃的方案、错误假设、机器观察 vs Agent 报告的跳过文件、紧凑的 trigger findings 和 Recovery Brief 事实；同一轮的 redo 会替换该数字轮的 feedback 槽位，因此被放弃的 evaluation 本身不会另存一份。当前分支不会把被放弃的工作当作当前工作。
+在轮次边界，`fresh_invocation` 会开启新的模型对话；上一轮的 transcript、工具输出和未提交推理不会带入。LoopForge 从当前已提交治理事实、Machine Evidence、有界 Working Memory，以及适用的恢复或重试教训中，明确构建连续性。Agent 报告始终标注为报告，不会变成机器事实。
 
-## Agent 与 LoopForge 的职责边界
+这是模型对话边界，不是宿主重启或工作区重置。同一个 loop 身份和当前已修改的工作区继续；宿主进程仍可保持 MCP 连接、工具和已安装的 skill 文件可用。`same_round_retry` 可以在原 invocation 中继续，进行同一轮的上下文内修复；上下文策略会明确返回，并且独立于 prompt 密度。只有 rollback 或 recovery 才会恢复检查点。
 
-Agent 掌握语义和行动：理解任务、制定计划、使用工具、实现方案，以及决定是否请求恢复。LoopForge 负责连续性和流程保障：保存已提交轮次、记录机器观察、确定性地校验并处置提交，以及验证恢复点。
+### 带有验证边界的恢复
 
-LoopForge 的作用是让 Agent 自己的推理和方向修正能够跨轮次延续，而不是用固定计划或由 harness 编写的进度叙事取代它们。
+当 Agent 判断当前方向应当放弃时，可以请求恢复到可用的工作区检查点。LoopForge 记录 rollback directive，还原文件和 Git 状态，并在发出 redo prompt 前验证完整的恢复边界。机器规则触发的 backtrack 使用同一恢复协议。
 
-LoopForge 不执行编码任务，不保证任务正确或完成，也不管理 Agent 的私有对话记忆。它提供的 prompt 携带当前已提交的治理事实、紧凑的机器证据，以及有界的 Agent 报告 Working Memory。可选 state file 是派生视图，不是另一套事实来源。
+恢复不会伪造成功评估，也不会把还原当成进展。Redo 会在已验证的工作区状态上继续，并携带恢复教训；被放弃的路径仍与当前工作明确区分。
+
+## 职责边界
+
+Agent 负责理解任务、制定计划、使用工具、实现方案，以及决定是否请求恢复。LoopForge 负责保存已提交轮次、收集已配置的观察、确定性地检查轮次边界，并验证恢复过程。
+
+LoopForge 不是编码 Agent 或规划器，也不保证任务必然正确。它不管理模型的私有记忆或 provider cache。它为外部 Agent 的工作提供持久的过程保障，同时把推理和决策留给 Agent。
 
 ## 安装
 

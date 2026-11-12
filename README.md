@@ -1,178 +1,133 @@
 # LoopForge
 
-**Durable round infrastructure for coding agents.**
+**Durable work continuity and machine evidence for multi-round coding agents.**
 
-Coding agents can reason and change code. Work that spans multiple turns also
-needs continuity: which results were accepted, what the configured checks
-observed, and where work can safely resume. LoopForge provides that continuity
-around the agent's work.
+Coding agents can make progress quickly. The hard part is keeping that progress
+reliable across rounds: a conversation may be summarized, interrupted, or
+restarted, while accepted work, failed attempts, machine observations, and
+abandoned changes all risk blending together.
 
-LoopForge records accepted rounds, preserves machine observations, and prepares
-the next prompt from committed state. The agent remains in control of the task:
-it interprets the request, chooses an approach, changes the workspace, and
-decides when to request recovery. LoopForge makes committed outcomes durable
-and checks the boundaries around them.
+LoopForge gives each work round a durable boundary. It records what was
+committed, keeps machine observations attached to that record, and prepares the
+prompt for the next model invocation from the resulting state. The agent still
+decides what the task means and how to do it; LoopForge makes the process around
+that work traceable and recoverable.
 
 [中文说明](./README.zh-CN.md) · [Package and integration guide](./loopforge/README.md)
 
-## Why LoopForge
+## The problem
 
-An agent conversation is not a reliable transaction log. It can contain work
-that was never submitted, a rejected attempt, or changes later abandoned. A
-summary of that conversation can blur the difference between committed work
-and what remains uncertain.
+A long coding task is not one uninterrupted action. It is a sequence of work
+slices, decisions, checks, and sometimes course corrections. Conversation
+history is useful, but it is not a dependable record of that sequence. It can
+include unsubmitted work, rejected attempts, claims that checks did not confirm,
+and changes that were later abandoned.
 
-LoopForge gives each round a durable outcome. Accepted work becomes typed,
-committed history; rejected attempts do not. Machine observations are kept with
-the round so later decisions can distinguish an agent's report from what the
-configured checks observed. The next prompt is derived from committed facts,
-not from a separate progress narrative maintained alongside them.
+LoopForge treats each accepted round as a transaction in a typed history. The
+next round is prepared from committed state, not inferred from an informal
+summary. When something is uncertain, that uncertainty remains visible instead
+of being converted into a pass or an empty result.
 
-## How it works
+## How a round works
 
 ```text
-LoopForge prepares current committed context
-                    |
-                    v
-Agent chooses and performs the work
-                    |
-                    v
-Agent submits a result or requests recovery
-                    |
-                    v
-LoopForge records observations and applies round rules
-                    |
-          commit, reject, or restore
-                    |
-                    v
-Next prompt from the resulting committed state
+LoopForge prepares a prompt from committed state
+                       |
+                       v
+Agent interprets the task and performs a work slice
+                       |
+                       v
+Agent submits a structured result or requests recovery
+                       |
+                       v
+LoopForge observes, validates, and commits or rejects
+                       |
+                       v
+The next prompt is derived from the resulting state
 ```
 
-An agent report describes what the agent believes happened. It is not proof by
-itself. LoopForge compares reports with available observations, such as Git
-workspace changes and explicitly configured verification commands. If an
-observation is unavailable, LoopForge preserves that uncertainty instead of
-treating it as a pass or as an empty change set.
+A round is a coherent work slice with a before/after evidence boundary. The
+agent decides whether that slice is complete and whether to continue. A
+rejected attempt does not become committed round history. An invalid submission
+does not advance the round. Accepted outcomes and their observations are
+recorded together.
 
-Each prompt carries a derived context strategy. `fresh_invocation` is clean
-context: the host starts a new model conversation, so the previous model
-transcript, tool outputs and uncommitted reasoning do not leak into the next
-round. It is not a host-runtime restart requirement and not a workspace reset:
-the same `loopId`, logical session and current modified workspace continue, and
-a host process that stays alive may keep the MCP connection and tool processes
-warm and the installed skill files available. LoopForge does not manage
-provider prompt/KV caches or implicit Agent habits; anything that must survive
-belongs in the prompt's committed projection, and host-side state outside it is
-explicit host configuration, not a LoopForge fact. `fresh_invocation` is used
-for the first round, a normal next round, a recovery redo, rejection escalation
-and invocation recovery, and it may describe the SAME logical round. Only
-rollback/recovery restores a checkpoint. `same_round_retry` is in-context
-repair: it continues the original invocation and injects the rejection notice,
-findings and failure reason. A `rejection_escalation` retry is clean-context
-repair: a new model conversation that still carries those failure lessons. If
-the invocation that received an in-context retry prompt is gone, call
-`loopforge_resume` with `invocationLost: true`; LoopForge recompiles the SAME
-round and attempt as `fresh_invocation` / `invocation_recovery` at L2, with
-Machine Evidence, bounded Working Memory and the rejection lessons. Prompt
-density and context boundary are independent; follow the returned
-`contextMode` and `contextReason`, rather than inferring the boundary from L0,
-L1, or L2.
+For example, when an agent builds a feature over several slices, each accepted
+slice leaves a typed record and observations from the same boundary. The next
+model conversation starts from committed state rather than the old transcript.
+If the agent decides to abandon its approach, it can request a restore; LoopForge
+verifies the target workspace before work resumes.
 
-The MCP transport separates stable content from dynamic content. The
-`initialize` result's `instructions`, the `tools/list` schemas and the installed
-skill files are stable for a given server build, policy and installed package
-version; the per-response `prompt`, `submission_guidance` and
-`submissionHandle` are dynamic. The dynamic prompt is a projection of committed
-state, not a summary of the previous conversation. A host adapter can therefore
-keep the stable environment warm while starting a clean model conversation for
-each `fresh_invocation` round.
+## What makes LoopForge different
 
-`loopforge_next` and `loopforge_resume` accept an optional
-`currentUserInstruction`. It is host input for that invocation and never
-rewrites the loop's task, objective, criteria, constraints or Round Contract;
-omitting it makes the prompt state that no instruction was provided instead of
-inferring one from older text.
+### Durable rounds, not conversation summaries
 
-Round results keep three kinds of facts separate: the Agent report
-(`success_claim`, `outcome`, `blocker`), the LoopForge decision
-(`loop_stop_reason`), and the persisted Machine evidence. Explain, terminal
-stop output and `resume` of a stopped loop render the same three blocks;
-`completed` never implies machine-backed success.
+LoopForge stores committed rounds as typed records in the Vault. That history
+is the factual source for prompts and read-only views. A state file, receipt,
+replay, audit, or explanation is a projection of that history, never a parallel
+ledger. This keeps accepted work distinct from attempts that were rejected or
+later abandoned.
 
-Continuity may include bounded Working Memory derived from the current branch's
-committed rounds and rollback directives: recent reports, falsified assumptions
-and retractions, open questions, consumed recoveries and contract redirects.
-Its source window and per-item limits are fixed code constants, not policy.
-L1 and L2 render the same full fixed projection; L0 stays compact. The default
-prompt ceilings are 5,000 characters for L0, 50,000 for L1 and 100,000 for L2.
-These are safety ceilings, not targets for routine memory omission. Working
-Memory is one indivisible optional section, so it can be dropped whole if the
-prompt cannot fit it; the prompt artifact records that omission and its counts.
-It is part of the one canonical cognitive state, never a second history or
-memory store, and Agent-reported entries never enter a verification gate.
-Machine Evidence (observed providers, command statuses and verified contract
-items) is a separate protected section and informs verification. Older history
-is retrieved explicitly with `loopforge_replay` or `loopforge_status view:
-\"explain\"`.
+### Agent reports and machine evidence stay separate
+
+The agent reports what it believes it changed or completed. LoopForge records
+those reports as claims. Git workspace observations and explicitly configured
+verification commands provide machine-visible evidence. A claim alone does not
+verify a result, and an unavailable observation remains unknown. The persisted
+evidence posture is derived once at commit and reused by prompts, receipts, and
+read-only views.
+
+When an effective success claim is supported by an after-phase command whose
+entrypoint and configuration are untampered and whose result passed, the
+verification gate persists `machineBackedSuccess` in that round's evidence
+posture. Read surfaces reuse this fact instead of re-deriving it. A loop
+reported as `completed` has passed its configured stop gates; that lifecycle
+result is not a universal proof that the task is correct.
 
 For work that benefits from a bounded slice, the agent can propose a Round
-Contract: a deliverable, acceptance conditions, and commands to check them.
-LoopForge validates the structure and command bindings. An item is verified
-when the agent claims it is met and its bound commands pass in the closing
-round with the declared binding. A later command disable or reconfigure does
-not rewrite a historical pass, and only command observations are test facts —
-there is no Agent-reported test count. Whether the proposed deliverable or test
-is semantically appropriate remains the agent's and operator's judgment. With
-an after-capable command, a continuing round must leave an ACTIVE contract for
-the next round: omit the proposal to continue it, declare the next slice, or
-replace it with `round_contract.supersedes` and different acceptance items. The
-old contract closes as `superseded` and stays visible in the audit record. The
-agent's declared `scope` is a report-only intent, not a permission, and never
-participates in contract identity.
+Contract: a deliverable, acceptance conditions, and configured commands that
+can check them. LoopForge validates the structure and bindings. The agent and
+operator remain responsible for deciding whether the deliverable and checks
+make sense.
 
-Criterion and contract-item claims share one `execution_report.claims` channel:
-entries cite a `cr-` criterion id (advisory) or an `rci-` active-contract item
-id (strict). A claim never verifies anything by itself. The overall working
-objective can evolve through an event-driven `objective_refinement`; it changes
-only the objective text used by the next prompt and goalId, never Operator
-Acceptance, success criteria or hard constraints. Omit it when the objective is
-unchanged.
+### A clean model conversation at each new round
 
-## Recovery with the agent in control
+At a round boundary, `fresh_invocation` starts a new model conversation. The
+previous transcript, tool outputs, and uncommitted reasoning do not carry into
+it. LoopForge prepares continuity explicitly from committed governance facts,
+Machine Evidence, bounded Working Memory, and any applicable recovery or retry
+lessons. Agent reports remain labelled as reports; they do not become machine
+facts.
 
-The agent may recognize that its current direction is wrong and request
-recovery to a workspace checkpoint, the automatic before-image of a prepared
-round or an explicit `loopforge_checkpoint` savepoint. LoopForge does not
-diagnose the mistake or choose the destination. It resolves the checkpoint
-through the branch's transaction refs, records the rollback as a durable event,
-then restores the files and HEAD itself and verifies the complete Git boundary
-before issuing the redo prompt.
+This is a model-conversation boundary, not a host restart or workspace reset.
+The same loop identity and current modified workspace continue, and a live host
+may keep its MCP connection, tools, and installed skill files warm. A
+`same_round_retry` can continue the original invocation for an in-context repair;
+context mode is reported explicitly and is independent of prompt density. Only
+rollback or recovery restores a checkpoint.
 
-LoopForge can also trigger a backtrack when a machine rule requires it. Both
-paths use the same restore protocol and remain visible in history. Redo
-continues on a child branch. The rollback directive keeps the abandoned
-approaches, wrong assumptions, machine-observed vs Agent-reported skipped
-files, compact trigger findings and Recovery Brief facts; a same-round redo
-replaces that numeric round's feedback slot, so the abandoned evaluation itself
-is not kept as a second copy. The current branch never treats abandoned work as
-current work.
+### Recovery with a verified restore boundary
 
-## The responsibility boundary
+When the agent decides its current direction should be abandoned, it can request
+recovery to an available workspace checkpoint. LoopForge records the rollback
+directive, restores the files and Git state, and verifies the complete restore
+boundary before issuing the redo prompt. Machine-triggered backtracks use the
+same restore protocol.
 
-The agent owns meaning and action: task interpretation, planning, tool use,
-implementation, and the choice to request recovery. LoopForge owns continuity
-and process guarantees: committed round history, machine observations,
-deterministic validation and disposition, and checkpoint restore verification.
+Recovery does not fabricate a successful evaluation or treat a restore as
+progress. The redo continues with the recovery lessons and verified workspace
+state, while the abandoned path remains distinguishable from current work.
 
-LoopForge exists to help the agent's own reasoning and course corrections
-survive across rounds. It does not replace them with a fixed plan or a
-harness-authored account of progress.
+## Responsibility boundary
 
-LoopForge does not execute the coding task, guarantee that a task is correct or
-complete, or manage the agent's private conversation memory. Its prompt carries
-current committed governance facts, compact machine evidence, and bounded
-Agent-report Working Memory. The optional state file is a derived view, not
-another source of truth.
+The agent owns task interpretation, planning, tool use, implementation, and the
+decision to request recovery. LoopForge owns committed round history, configured
+observations, deterministic boundary checks, and verified restore mechanics.
+
+LoopForge is not a coding agent, planner, or guarantee that a task is correct.
+It does not manage private model memory or provider caches. It gives an external
+agent a durable process around its work, while leaving the reasoning and
+decisions with that agent.
 
 ## Install
 

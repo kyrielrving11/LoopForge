@@ -1,7 +1,9 @@
 /** v4.0.8 — prompt/guidance density and same-fact deduplication.
  *
  *  The baselines are the 4.0.7 measurements recorded in the release plan.
- *  They are test data only; no baseline file is read at runtime.
+ *  They are test data only; no baseline file is read at runtime. Fixture
+ *  ceilings include the restored stop rules, file scope and event cues;
+ *  runtime prompt budgets are unchanged.
  */
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
@@ -207,7 +209,7 @@ function assemble(
 }
 
 describe("v4.0.8 — prompt density budgets", () => {
-  it("keeps the first-round prompt under 4,000 chars and 40% smaller", () => {
+  it("keeps first-round decision cues under 4,500 chars and 35% smaller", () => {
     resetPolicy();
     const response = compileLoop(makeLoopCompileRequest({
       loop_id: "density-first",
@@ -222,13 +224,13 @@ describe("v4.0.8 — prompt density budgets", () => {
     }), null);
     assert.equal(response.prompt_artifact?.level, "l2");
     assert.equal(response.prompt_artifact?.contextReason, "first_round");
-    assert.ok(response.prompt.length <= 4_000,
+    assert.ok(response.prompt.length <= 4_500,
       `first-round prompt was ${response.prompt.length} chars`);
-    assert.ok(reduction(FIRST_ROUND_BASELINE, response.prompt.length) >= 0.40,
+    assert.ok(reduction(FIRST_ROUND_BASELINE, response.prompt.length) >= 0.35,
       `first-round reduction was ${reduction(FIRST_ROUND_BASELINE, response.prompt.length)}`);
   });
 
-  it("keeps the second-round prompt under 4,300 chars and 40% smaller", () => {
+  it("keeps second-round decision cues under 5,000 chars and 30% smaller", () => {
     resetPolicy();
     const loopId = "density-second";
     const response = compileLoop(makeLoopCompileRequest({
@@ -240,9 +242,9 @@ describe("v4.0.8 — prompt density budgets", () => {
       results: [committedFeedbackRound(1, { loopId, success: true })],
     });
     assert.equal(response.prompt_artifact?.level, "l1");
-    assert.ok(response.prompt.length <= 4_300,
+    assert.ok(response.prompt.length <= 5_000,
       `second-round prompt was ${response.prompt.length} chars`);
-    assert.ok(reduction(SECOND_ROUND_BASELINE, response.prompt.length) >= 0.40,
+    assert.ok(reduction(SECOND_ROUND_BASELINE, response.prompt.length) >= 0.30,
       `second-round reduction was ${reduction(SECOND_ROUND_BASELINE, response.prompt.length)}`);
   });
 
@@ -266,7 +268,7 @@ describe("v4.0.8 — prompt density budgets", () => {
       `L0 retry reduction was ${reduction(L0_RETRY_BASELINE, response.prompt.length)}`);
   });
 
-  it("keeps the minimal prompt + guidance under 8,000 chars and 35% smaller", () => {
+  it("keeps prompt + guidance with decision cues under 9,000 chars and 30% smaller", () => {
     resetPolicy();
     const loopId = "density-payload";
     const response = compileLoop(makeLoopCompileRequest({
@@ -298,8 +300,8 @@ describe("v4.0.8 — prompt density budgets", () => {
     const payload = response.prompt.length + guidanceChars;
     assert.ok(guidanceChars <= 4_500,
       `submission_guidance was ${guidanceChars} chars`);
-    assert.ok(payload <= 8_000, `dynamic payload was ${payload} chars`);
-    assert.ok(reduction(FULL_PAYLOAD_BASELINE, payload) >= 0.35,
+    assert.ok(payload <= 9_000, `dynamic payload was ${payload} chars`);
+    assert.ok(reduction(FULL_PAYLOAD_BASELINE, payload) >= 0.30,
       `dynamic payload reduction was ${reduction(FULL_PAYLOAD_BASELINE, payload)}`);
     assert.ok(reduction(GUIDANCE_BASELINE, guidanceChars) >= 0.24,
       `guidance reduction was ${reduction(GUIDANCE_BASELINE, guidanceChars)}`);
@@ -459,28 +461,42 @@ describe("v4.0.8 — same-fact deduplication and fact preservation", () => {
     ), 1);
   });
 
-  it("is self-sufficient without submission_guidance", () => {
-    const block = renderSelfEvalBlock({
-      round: 2,
-      maxRounds: 20,
-      activeContract: null,
-      itemStatuses: null,
-      commands: [],
-      contractVerificationAvailable: false,
-      subGoals: [],
-      gateEnabled: false,
-      criteria: testCriteria(),
+  for (const level of ["l0", "l1", "l2"] as const) {
+    it(`${level} carries stop/blocker rules, file scope and event cues without guidance or a state file`, () => {
+      const prompt = assemble(minimalState({ stateFilePath: "" }), { level }).renderedPrompt;
+      const base = prompt.match(/```json\n([^\n]+)\n```/);
+      assert.ok(base);
+      assert.deepEqual(Object.keys(JSON.parse(base[1])), [
+        "outcome", "output_summary", "constraint_violations", "should_continue",
+      ]);
+      assert.match(prompt, /success \| partial \| failed \| blocked/);
+      assert.match(prompt, /success\/blocked require should_continue=false/);
+      assert.match(prompt, /blocked also needs a non-empty blocker/);
+      assert.match(prompt, /partial\/failed may continue or stop/);
+      assert.match(prompt, /net content\/type change from round start, including deletions/i);
+      assert.match(prompt, /only tracked and non-ignored untracked paths/i);
+      assert.match(prompt, /evidence falsified an earlier assumption[^\n]+`wrong_assumptions`/i);
+      assert.match(prompt, /question affects later work[^\n]+`open_questions`/i);
     });
-    for (const marker of [
-      "outcome",
-      "output_summary",
-      "constraint_violations",
-      "should_continue",
-      "execution_report",
-      "files_changed",
-      "claims",
-    ]) {
-      assert.ok(block.includes(marker), `the prompt template carries ${marker}`);
-    }
+  }
+
+  it("does not suggest continuing or redirecting a closed contract or redirecting on the final round", () => {
+    const contract = testContract();
+    const closed = assemble(minimalState({
+      roundContract: contract,
+      contractItemStatuses: { ...testItemStatuses(), closure: "verified" },
+      capability: testCapability(),
+    })).renderedPrompt;
+    assert.match(closed, /already closed.*successor/);
+    assert.doesNotMatch(closed, /omit `round_contract` to continue it unchanged/i);
+    assert.doesNotMatch(closed, /`round_contract\.supersedes`/);
+    const final = assemble(minimalState({
+      round: 20,
+      maxRounds: 20,
+      roundContract: contract,
+      capability: testCapability(),
+    })).renderedPrompt;
+    assert.match(final, /final configured round; do not submit a successor/);
+    assert.doesNotMatch(final, /`round_contract\.supersedes`/);
   });
 });

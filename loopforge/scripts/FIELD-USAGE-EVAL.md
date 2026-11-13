@@ -27,7 +27,8 @@ For every run, record per round:
   (must be zero);
 - whether a failed round with an unobservable Git/command boundary stayed L1
   rather than L0 (must be one);
-- whether the L0 prompt named the same applicable optional paths as L1/L2,
+- whether the L0 prompt paired the same applicable optional paths with their
+  event triggers as L1/L2,
   with the real `cr-`/`rci-`/`sg-` ids available in the prompt or live
   `submission_guidance`;
 - whether `round_contract` was proposed using the current requirement and a

@@ -28,6 +28,7 @@ import { deriveSubGoals } from "./subgoal-state.js";
 import { deriveContractRequirement } from "./contract-requirement.js";
 import type {
   ContractItemStatus,
+  ContractSupersede,
   CriterionStatus,
   PromptArtifact,
   SubGoal,
@@ -109,17 +110,24 @@ export const FIELD_ORDER = [
 
 export type FieldPath = (typeof FIELD_ORDER)[number];
 
+const OUTCOME_COMBINATIONS =
+  "success/blocked require should_continue=false; blocked also needs a " +
+  "non-empty blocker. partial/failed may continue or stop.";
+
+const FILES_CHANGED_BOUNDARY =
+  "Net content/type change from round start, including deletions; a commit " +
+  "alone adds nothing. Include only tracked and non-ignored untracked paths.";
+
 const GUIDES: FieldGuide[] = [
   {
     path: "outcome",
     purpose: "The ONE round conclusion.",
-    when: "Every round; success/blocked must stop, blocked also needs a blocker.",
+    when: "Every round: success | partial | failed | blocked. " + OUTCOME_COMBINATIONS,
     nature: "claim",
     downstream: "Stop/success trajectory; a claim, not evidence.",
     toolDescription:
-      "Required. success | partial | failed | blocked. success requires " +
-      "should_continue=false; blocked requires should_continue=false and a " +
-      "non-empty blocker. partial/failed may continue or stop. This is the ONE " +
+      "Required. success | partial | failed | blocked. " +
+      OUTCOME_COMBINATIONS + " This is the ONE " +
       "round conclusion.",
     core: true,
   },
@@ -163,14 +171,10 @@ const GUIDES: FieldGuide[] = [
     purpose:
       "The boundary net change: paths whose content or file type differs between " +
       "round preparation and this submission, including deleted paths.",
-    when: "When the workspace changed; a commit alone adds nothing.",
+    when: "When the workspace changed. " + FILES_CHANGED_BOUNDARY,
     nature: "report",
     downstream: "Compared with machine boundary; not observation.",
-    toolDescription:
-      "Paths whose content or file type differs between round start and this " +
-      "submission, including deletions. A commit alone does not add a path when " +
-      "content is unchanged. Gitignored paths are outside the machine boundary — " +
-      "do not report them merely to look complete.",
+    toolDescription: FILES_CHANGED_BOUNDARY,
     reportOnly: false,
   },
   {
@@ -518,6 +522,10 @@ function firstActiveSubGoal(subGoals: ReadonlyArray<SubGoal>): SubGoal | null {
   return subGoals.find((item) => item.status !== "done" && item.status !== "canceled") ?? null;
 }
 
+function contractSupersedeExample(contract: ActiveContractView): ContractSupersede {
+  return { contract_id: contract.id, reason: "<why the slice changed>" };
+}
+
 /** A legal minimal example for a field, or null when the current facts make the
  *  field unusable (no real id/command to cite). The renderer omits nulls; it
  *  never invents an sg-/rci- reference. */
@@ -564,6 +572,9 @@ export function fieldExample(
           criterion_refs: [],
           verify_with: [ctx.commands[0]],
         }],
+        ...(ctx.activeContract
+          ? { supersedes: contractSupersedeExample(ctx.activeContract) }
+          : {}),
       };
     }
     case "worker_results":
@@ -693,13 +704,12 @@ function renderContractGuidance(ctx: SelfEvalPromptContext): string[] {
       ctx.maxRounds === undefined || ctx.round < ctx.maxRounds,
   });
   if (contract) {
-    const lines = [
-      `Active contract \`${contract.id}\`: omit \`round_contract\` to continue ` +
-        "it unchanged; to replace it, add `round_contract.supersedes` with " +
-        "that id and different acceptance items.",
-    ];
+    const lines = [`Active contract \`${contract.id}\`.`];
+    const continueOpenContract =
+      "While open, omit `round_contract` to continue it unchanged.";
     if (requirement.reason === "no_contract_capability") {
       lines.push(
+        continueOpenContract,
         "No enabled after-capable command is configured, so its items cannot " +
           "be machine-verified and no successor is required.",
       );
@@ -715,6 +725,9 @@ function renderContractGuidance(ctx: SelfEvalPromptContext): string[] {
       );
     } else {
       lines.push(
+        continueOpenContract + " To replace it, " +
+          "submit different acceptance items with `round_contract.supersedes`: " +
+          `\`${JSON.stringify(contractSupersedeExample(contract))}\` (reason optional).`,
         "If this round closes the contract and you continue, a successor " +
           "`round_contract` is REQUIRED for the next round.",
       );
@@ -755,10 +768,9 @@ function renderSubGoalGuidance(ctx: SelfEvalPromptContext): string[] {
   ];
 }
 
-/** The prompt names the optional paths; their when/example/effect stay in the
- *  live `submission_guidance`. This keeps the prompt a current-fact surface,
- *  not a second field manual. */
-function renderOptionalPaths(ctx: SelfEvalPromptContext): string[] {
+/** Render each optional event's existing `when` once beside its path. Full
+ *  examples and effects stay in guidance; no second trigger text is maintained. */
+function renderOptionalTriggers(ctx: SelfEvalPromptContext): string[] {
   const facts: GuidanceFacts = {
     activeContract: ctx.activeContract,
     itemStatuses: ctx.itemStatuses,
@@ -772,9 +784,9 @@ function renderOptionalPaths(ctx: SelfEvalPromptContext): string[] {
     .filter((path) => path !== "execution_report.claims");
   if (paths.length === 0) return [];
   return [
-    "Optional event fields (only when the event happened): " +
-      paths.join(", ") +
-      ". Their when/example/effect are in `submission_guidance`.",
+    "Optional event fields — only when the event happened; examples/effects " +
+      "are in `submission_guidance`:",
+    ...paths.map((path) => `- ${GUIDE_BY_PATH.get(path)!.when} → \`${path}\``),
   ];
 }
 
@@ -802,6 +814,7 @@ export function renderSelfEvalBlock(ctx: SelfEvalPromptContext): string {
     "```json",
     JSON.stringify(base),
     "```",
+    `\`outcome\`: ${GUIDE_BY_PATH.get("outcome")!.when}`,
     "Execution report (when files changed or you claim items):",
     "```json",
     JSON.stringify({
@@ -811,10 +824,9 @@ export function renderSelfEvalBlock(ctx: SelfEvalPromptContext): string {
       },
     }),
     "```",
-    "`files_changed` is net change from round start, including deletions; " +
-      "a commit adds nothing.",
+    `\`files_changed\`: ${fieldGuideDescription("execution_report.files_changed")}`,
   ];
-  lines.push(...renderOptionalPaths(ctx));
+  lines.push(...renderOptionalTriggers(ctx));
   lines.push(...renderContractGuidance(ctx));
   lines.push(...renderSubGoalGuidance(ctx));
   lines.push(

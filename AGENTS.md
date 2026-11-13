@@ -164,8 +164,7 @@ second copy of the executable rules.
 The tool schema, the prompt evaluation block, `submission_guidance` and the
 receipt all read it. Never keep a second copy of field semantics. The full legal
 shape stays in guidance; optional fields are opportunities, not a coverage
-checklist. The prompt block names the applicable optional paths only; their
-`when`/`example`/`effect` stay in the per-round guidance.
+checklist.
 
 ### 9. Empty, unknown and not-applicable are three different states
 

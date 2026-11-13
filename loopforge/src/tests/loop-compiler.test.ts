@@ -460,9 +460,9 @@ describe("cognitive-state compiler", () => {
   it("self-eval template explains the boundary files_changed meaning", () => {
     const block = buildSelfEvalBlock(evalCtx());
     assert.ok(block.includes("files_changed"));
-    assert.ok(block.includes("net change from round start"));
+    assert.match(block, /net content\/type change from round start/i);
     assert.ok(block.includes("including deletions"));
-    assert.ok(block.includes("a commit adds nothing"));
+    assert.ok(block.includes("a commit alone adds nothing"));
   });
 
 

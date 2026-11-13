@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+- Restore compact optional-event triggers from the existing field `when`
+  descriptions, with full examples and effects kept in `submission_guidance`.
+- Keep outcome/continuation/blocker combinations and the tracked/non-ignored
+  file-report boundary visible in the prompt and live guidance.
+- Show the active contract's real id inside a legal `supersedes` object in
+  redirect examples; closed contracts and the final round no longer advertise
+  the open-contract continuation/redirect instruction.
+- Test the meaning visible to the Agent at every prompt density, alongside
+  fixture size ceilings. Runtime budgets, gates and history rules are unchanged.
+
 ## 4.0.8 (2026-11-13)
 
 **The prompt-density and single-source release.** It removes duplicated prose

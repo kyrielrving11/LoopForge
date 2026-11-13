@@ -5,6 +5,7 @@ import {
   allFieldGuidePaths,
   deriveSubmissionGuidance,
   fieldExample,
+  fieldGuide,
   fieldGuideDescription,
   isFieldApplicable,
   isFieldPrompted,
@@ -26,11 +27,12 @@ import type {
   SubGoal,
 } from "../protocol.js";
 import type { ActiveContractView } from "../round-contract.js";
-import { deriveContractItemIds, deriveCriterionId } from "../token-utils.js";
+import { canonicalContractItemText, deriveContractItemIds, deriveCriterionId } from "../token-utils.js";
 import { deriveEmergedItems } from "../subgoal-state.js";
 import { committedFeedbackRound } from "./_helpers.js";
 import { decodeCommittedRound } from "../committed-round.js";
 import { DEFAULT_POLICY, resetPolicy, setPolicyForTest } from "../policy.js";
+import { validateContractShape } from "../self-eval.js";
 
 const CONTRACT = {
   work_item: "Slice A",
@@ -464,6 +466,96 @@ describe("v3.9.2 — compact trigger guidance", () => {
     }
     assert.match(block, /cr-12345678/);
     assert.match(block, /No active Round Contract/);
+  });
+
+  it("pairs every optional event with its shared trigger and omits downstream prose", () => {
+    const ctx: SelfEvalPromptContext = {
+      round: 2,
+      activeContract: null,
+      commands: ["verify"],
+      contractVerificationAvailable: true,
+      subGoals: [],
+      criteria: [criterion],
+    };
+    const block = renderSelfEvalBlock(ctx);
+    const lines = block.split("\n");
+    const events: ReadonlyArray<[string, RegExp]> = [
+      ["objective_refinement", /overall objective.*evolved/i],
+      ["discovered_constraints", /limit.*not known before/i],
+      ["wrong_assumptions", /evidence.*falsified.*earlier assumption/i],
+      ["open_questions", /question.*affects later work/i],
+      ["resolved_open_question_ids", /rendered open question.*resolved/i],
+      ["emerged_subtasks", /new work.*work item.*split/i],
+      ["worker_results", /work.*actually delegated/i],
+      ["subtask_boundary", /subtask boundary.*L2/i],
+    ];
+    for (const [path, trigger] of events) {
+      const line = lines.find((candidate) => candidate.endsWith(`→ \`${path}\``));
+      assert.ok(line, `${path} must have its own event cue`);
+      assert.match(line, trigger, `${path} must state when to report it`);
+      const guide = fieldGuide(path)!;
+      assert.ok(line.includes(guide.when), `${path} uses the existing when source`);
+      assert.ok(!line.includes(guide.downstream), `${path} does not repeat its effect`);
+    }
+    assert.match(block, /only when the event happened/i);
+  });
+
+  it("keeps the file observation scope visible in live guidance and the field description", () => {
+    const guidance = deriveSubmissionGuidance(sessionView(), { rounds: [] });
+    const files = guidance.fields.find((entry) => entry.path === "execution_report.files_changed");
+    assert.ok(files);
+    for (const text of [files.when, fieldGuideDescription(files.path)]) {
+      assert.match(text, /net content\/type change from round start/i);
+      assert.match(text, /including deletions/i);
+      assert.match(text, /commit alone adds nothing/i);
+      assert.match(text, /only tracked and non-ignored untracked paths/i);
+    }
+  });
+
+  it("gives live guidance and the prompt the same legal redirect object with the active id", () => {
+    withVerifyCommand();
+    const view = decodeCommittedRound(committedFeedbackRound(1, {
+      loopId: "guidance-loop",
+      contract: CONTRACT,
+    }));
+    assert.ok(view);
+    const guidance = deriveSubmissionGuidance(sessionView(), { rounds: [view] });
+    const example = guidance.fields.find((entry) => entry.path === "round_contract")
+      ?.example as Record<string, unknown>;
+    assert.ok(example);
+    const modifier = example.supersedes as { contract_id: string; reason?: string };
+    assert.equal(modifier.contract_id, guidance.active_contract?.id);
+    assert.equal(typeof modifier.reason, "string");
+    assert.deepEqual(validateContractShape({
+      outcome: "partial",
+      should_continue: true,
+      round_contract: example,
+    }, {
+      observed: true,
+      activeContractId: guidance.active_contract!.id,
+      activeItemIdentities: new Set(CONTRACT.items.map(canonicalContractItemText)),
+      activeItemIds: new Set(guidance.active_contract!.items.map((item) => item.id)),
+      knownCriterionIds: new Set(),
+      isConfiguredCommand: (name) => guidance.contract_commands.includes(name),
+    }), [], "the advertised redirect example passes the real strict boundary");
+    const block = renderSelfEvalBlock({
+      round: 2,
+      activeContract: { ...activeContract, id: guidance.active_contract!.id },
+      commands: ["verify"],
+      contractVerificationAvailable: true,
+      subGoals: [],
+    });
+    const json = block.match(/`round_contract\.supersedes`: `([^`]+)`/);
+    assert.ok(json, "the prompt must show a JSON object, not just an id");
+    assert.deepEqual(JSON.parse(json[1]), modifier);
+    assert.match(block, /reason optional/);
+    const first = fieldExample("round_contract", {
+      activeContract: null,
+      activeSubGoals: [],
+      commands: ["verify"],
+      contractVerificationAvailable: true,
+    }) as Record<string, unknown>;
+    assert.ok(!("supersedes" in first), "a first proposal never invents a redirect target");
   });
 
   it("v4.0.6: active-contract guidance follows the shared coverage rule", () => {

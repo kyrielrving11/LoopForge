@@ -38,14 +38,11 @@ function evalCtx(
 ): SelfEvalPromptContext {
   return {
     round: 3,
-    level: "l1",
     activeContract: null,
     itemStatuses: null,
     commands: ["verify"],
     contractVerificationAvailable: true,
     subGoals: [],
-    verificationFlags: [],
-    recovery: false,
     gateEnabled: false,
     ...overrides,
   };
@@ -366,12 +363,15 @@ describe("cognitive-state compiler", () => {
 
   // ── v2.8: Self-eval block sub-goal ID hints ────────────────────────────
 
-  it("buildSelfEvalBlock renders a real active sub-goal id and no placeholder id", () => {
+  it("buildSelfEvalBlock leaves sub-goal ids to the Active Sub-Goals section", () => {
     const block = buildSelfEvalBlock(evalCtx({ subGoals: [testSubGoal()] }));
-    assert.ok(block.includes("sg-12345678"), "uses the real active sub-goal id");
     assert.ok(block.includes("subgoal_updates"), "shows the update field");
+    assert.ok(block.includes("real `sg-` id"), "states the identity rule");
+    assert.ok(!block.includes("sg-12345678"),
+      "the sub-goal list stays in the protected section, not the evaluation block");
     const without = buildSelfEvalBlock(evalCtx({ subGoals: [] }));
-    assert.ok(!without.includes("sg-12345678"), "does not invent an id when none exists");
+    assert.ok(!without.includes("subgoal_updates"),
+      "no active sub-goal → no sub-goal rule");
     assert.ok(!without.includes("<sg-"), "does not render a placeholder id");
   });
 
@@ -462,7 +462,7 @@ describe("cognitive-state compiler", () => {
     assert.ok(block.includes("files_changed"));
     assert.ok(block.includes("net change from round start"));
     assert.ok(block.includes("including deletions"));
-    assert.ok(block.includes("gitignored paths are outside the machine boundary"));
+    assert.ok(block.includes("a commit adds nothing"));
   });
 
 
@@ -993,14 +993,19 @@ describe("v3.3 — round stats and machine status threading", () => {
 // ═══════════════════════════════════════════════════════════════════════════
 
 describe("v3.9.1 — Round Contract eval template", () => {
-  it("shows real active-contract item ids without requiring a restatement", () => {
+  it("names the active contract without re-listing its items", () => {
     const block = buildSelfEvalBlock(evalCtx({
       round: 4,
-      level: "l2",
       activeContract: testContract(),
     }));
-    assert.ok(block.includes("rci-12345678"), "renders the real rci id");
-    assert.ok(block.includes("Omit `round_contract` to CONTINUE"),
+    assert.ok(block.includes("rc-12345678"), "names the active contract id");
+    assert.ok(block.includes("rci-12345678"),
+      "the claims example cites a real active item");
+    assert.ok(!block.includes("Acceptance conditions"),
+      "the item list stays in Current Task / Active Round Contract");
+    assert.ok(!block.includes("verify via:"),
+      "command bindings stay in the current-fact section");
+    assert.ok(block.includes("omit `round_contract` to continue"),
       "continuing the contract needs no restatement");
     assert.ok(!block.includes("done_when"), "old contract shape is gone");
     assert.ok(!block.includes("verification_plan"), "old contract shape is gone");
@@ -1027,7 +1032,6 @@ describe("v3.9.1 — Round Contract eval template", () => {
   it("L0 retry stays lean but keeps functional contract claims", () => {
     const retry = buildSelfEvalBlock(evalCtx({
       round: 4,
-      level: "l0",
       activeContract: testContract(),
       subGoals: [testSubGoal()],
     }));
@@ -1084,7 +1088,7 @@ describe("v3.4 — ACTIVE Round Contract derivation (compileLoop)", () => {
     assert.ok(res.state_file_content?.includes("**Slice A**"));
     // The evaluation block states the continuation rule from the same derived
     // active contract (no last_round_result needed).
-    assert.ok(res.prompt.includes("Omit `round_contract` to CONTINUE"));
+    assert.ok(res.prompt.includes("omit `round_contract` to continue"));
   });
 
   it("L0 retry keeps the contract as Current Task but stays template-lean", () => {
@@ -1300,7 +1304,7 @@ describe("v3.9.2 — compact criteria guidance", () => {
       }),
     }), null);
     const criterionId = deriveCriterionId("Parser complete");
-    assert.match(response.prompt, /Optional fields — trigger → field → effect/);
+    assert.match(response.prompt, /Optional event fields/);
     assert.match(response.prompt, new RegExp(criterionId));
     assert.match(response.prompt, /Parser complete/);
     assert.doesNotMatch(response.prompt, /<criterion text or cr id from the prompt>/);
@@ -1504,7 +1508,6 @@ describe("3.9.3 — committed-fact prompt level", () => {
     assert.equal(response.recompile_level, "l0");
     const prompt = response.prompt;
     for (const path of [
-      "execution_report.claims",
       "discovered_constraints",
       "wrong_assumptions",
       "open_questions",
@@ -1512,9 +1515,10 @@ describe("3.9.3 — committed-fact prompt level", () => {
       "worker_results",
       "subtask_boundary",
     ]) {
-      assert.match(prompt, new RegExp("`" + path.replace(/\./g, "\.") + "`"),
+      assert.match(prompt, new RegExp(path.replace(/\./g, "\\.")),
         `L0 must still offer ${path}`);
     }
+    assert.match(prompt, /"claims"/, "the execution-report template carries claims");
     assert.match(prompt, /cr-[a-f0-9]{8}/, "real criterion id at L0");
     assert.match(prompt, /Ship it/);
   });
@@ -1619,7 +1623,7 @@ describe("3.9.3 — committed-fact prompt level", () => {
       }), null);
       const prompt = response.prompt;
       assert.match(prompt, /No active Round Contract/);
-      assert.match(prompt, /<bounded deliverable this slice produces>/);
+      assert.match(prompt, /<bounded deliverable>/);
       assert.match(prompt, /"verify_with": \[/);
       assert.match(prompt, /"verify"/);
       assert.doesNotMatch(prompt, /"work_item": "Build the parser"/,

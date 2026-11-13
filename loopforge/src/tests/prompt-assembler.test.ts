@@ -7,6 +7,7 @@ import { PROMPT_ARTIFACT_SCHEMA_VERSION } from "../protocol.js";
 import type { PromptAssemblyInput } from "../prompt-assembler.js";
 import {
   CANONICAL_STATE_SCHEMA_VERSION,
+  CURRENT_USER_INSTRUCTION_AUTHORITY,
   type CanonicalLoopState,
 } from "../canonical-state.js";
 import type { ConstraintMeta } from "../protocol.js";
@@ -262,11 +263,15 @@ describe("assemblePromptArtifact — L2", () => {
     assert.ok(!artifact.renderedPrompt.includes("Full Rehydrated State"));
   });
 
-  it("includes read instruction for L2 boundary reasons", () => {
+  it("names the state file once with its derived-view and stale-hash rule", () => {
     const artifact = assemblePromptArtifact(input({
       level: "l2",
     }));
-    assert.ok(artifact.renderedPrompt.includes("Read the state file before acting"));
+    const path = ".loopforge/state/test.md";
+    assert.equal(artifact.renderedPrompt.split(path).length - 1, 1,
+      "the state-file path appears exactly once");
+    assert.ok(artifact.renderedPrompt.includes("not an independent ledger"));
+    assert.ok(artifact.renderedPrompt.includes("treat it as stale"));
   });
 });
 
@@ -309,13 +314,20 @@ describe("assemblePromptArtifact — memory boundary", () => {
     assert.ok(retry.renderedPrompt.includes("loopforge_status view=explain"));
   });
 
+  it("does not confuse the working Objective with Operator Acceptance", () => {
+    assert.match(CURRENT_USER_INSTRUCTION_AUTHORITY, /working Objective/);
+    assert.match(CURRENT_USER_INSTRUCTION_AUTHORITY, /objective_refinement/);
+    assert.match(CURRENT_USER_INSTRUCTION_AUTHORITY, /Operator Acceptance/);
+    assert.ok(!CURRENT_USER_INSTRUCTION_AUTHORITY.includes("changed objective"),
+      "the authority note must not forbid objective_refinement");
+  });
+
   it("does not call the state file the source of truth", () => {
     const artifact = assemblePromptArtifact(input({
       level: "l2",
     }));
-    assert.ok(artifact.renderedPrompt.includes("Read the state file before acting"));
+    assert.ok(artifact.renderedPrompt.includes("derived, not an independent ledger"));
     assert.ok(!artifact.renderedPrompt.includes("the state file is the source of truth"));
-    assert.ok(artifact.renderedPrompt.includes("derived"));
   });
 
   it("renders bounded Working Memory reports with explicit report labels", () => {
@@ -423,11 +435,10 @@ describe("assemblePromptArtifact — metadata", () => {
     assert.ok(tight.renderedPrompt.includes("Current Task"));
   });
 
-  it("includes how-to-complete footer", () => {
+  it("includes the minimal how-to-complete footer", () => {
     const artifact = assemblePromptArtifact(input());
     assert.ok(artifact.renderedPrompt.includes("How to Complete This Round"));
-    assert.ok(artifact.renderedPrompt.includes("`submissionHandle` object returned"));
-    assert.ok(artifact.renderedPrompt.includes("loopforge_checkpoint"));
+    assert.ok(artifact.renderedPrompt.includes("current `submissionHandle`"));
     assert.ok(artifact.renderedPrompt.includes(LOST_HANDLE_ROUTING),
       "the footer carries the shared lost-handle routing rule");
     assert.ok(!artifact.renderedPrompt.includes("progress_estimate`"));
@@ -493,7 +504,7 @@ describe("v3.2 — verification flag actions", () => {
     assert.match(artifact.renderedPrompt, /ℹ️ \[duplicate_constraint_discovery\]/);
   });
 
-  it("keeps L0 byte-identical — no continuation lines", () => {
+  it("L0 verification gate carries the action too", () => {
     const artifact = assemblePromptArtifact(input({
       level: "l0",
       state: minimalState({
@@ -503,8 +514,8 @@ describe("v3.2 — verification flag actions", () => {
         ],
       }),
     }));
-    assert.ok(!artifact.renderedPrompt.includes("→ Fix:"), "L0 retry prompt must not grow");
-    assert.ok(!artifact.renderedPrompt.includes("→ Action:"), "L0 retry prompt must not grow");
+    assert.match(artifact.renderedPrompt, /→ Fix: Complete the remaining criteria/);
+    assert.match(artifact.renderedPrompt, /→ Action: Re-examine the flagged claim/);
     assert.ok(artifact.renderedPrompt.includes("🚫"));
     assert.ok(artifact.renderedPrompt.includes("CONTRADICTED"));
   });
@@ -630,6 +641,14 @@ describe("v3.3 — machine dashboard rows and round stats", () => {
 // ═══════════════════════════════════════════════════════════════════════════
 
 describe("assemblePromptArtifact — budget determinism", () => {
+  it("keeps the direct-assembler fallback budgets aligned with policy", () => {
+    assert.deepEqual(DEFAULT_PROMPT_BUDGETS, {
+      l0: DEFAULT_POLICY.prompt.l0_max_chars,
+      l1: DEFAULT_POLICY.prompt.l1_max_chars,
+      l2: DEFAULT_POLICY.prompt.l2_max_chars,
+    });
+  });
+
   /** A state with plenty of optional content at every priority. */
   const loadedState = () => minimalState({
     subGoals: [

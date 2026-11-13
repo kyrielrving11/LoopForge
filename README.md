@@ -96,8 +96,9 @@ At a round boundary, `fresh_invocation` starts a new model conversation. The
 previous transcript, tool outputs, and uncommitted reasoning do not carry into
 it. LoopForge prepares continuity explicitly from committed governance facts,
 Machine Evidence, bounded Working Memory, and any applicable recovery or retry
-lessons. Agent reports remain labelled as reports; they do not become machine
-facts.
+lessons. The prompt is a compact projection with a minimal submission template;
+detailed field facts stay in the live `submission_guidance`. Agent reports
+remain labelled as reports; they do not become machine facts.
 
 This is a model-conversation boundary, not a host restart or workspace reset.
 The same loop identity and current modified workspace continue, and a live host

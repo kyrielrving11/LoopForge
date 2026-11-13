@@ -34,8 +34,6 @@ export interface FieldGuide {
     array?: true;
     /** One of the four strict core fields. */
     core?: boolean;
-    /** v3.9.2: a compact trigger sentence used only by the prompt checklist. */
-    decision?: string;
     /** 3.9.3: the ONLY marker of compact-checklist membership. The set is
      *  level-independent: L0/L1/L2 differ in state density, never in which
      *  evaluation fields they offer. Fields with dedicated contract/sub-goal
@@ -98,18 +96,17 @@ export declare function promptedFieldPaths(facts: GuidanceFacts): string[];
 export interface SelfEvalPromptContext {
     round: number;
     maxRounds?: number;
-    level: "l0" | "l1" | "l2";
     activeContract: ActiveContractView | null;
     itemStatuses?: ContractItemStatusView | null;
     commands: ReadonlyArray<string>;
     contractVerificationAvailable: boolean;
     subGoals: ReadonlyArray<SubGoal>;
-    verificationFlags: ReadonlyArray<VerificationFlag>;
-    recovery: boolean;
     gateEnabled?: boolean;
     criteria?: ReadonlyArray<CriterionStatus>;
 }
-/** Render the evaluation block appended to every prompt. */
+/** Render the minimal evaluation block appended to every prompt. The full
+ *  field interface (when/example/effect) stays in `submission_guidance`; this
+ *  block is self-sufficient for the core fields and the execution report. */
 export declare function renderSelfEvalBlock(ctx: SelfEvalPromptContext): string;
 /** The session slice guidance needs. Structural so lifecycle and manager can
  *  both pass their own view without importing each other. */

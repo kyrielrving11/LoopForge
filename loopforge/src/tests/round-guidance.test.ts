@@ -222,51 +222,58 @@ describe("v4.0.4 — context pair legality is fail-closed", () => {
 });
 
 describe("v4.0.4 — the skill points at the runtime rules", () => {
-  it("states the definition and pointer without restating executable sizing rules", () => {
+  it("points at the live rules without restating executable content", () => {
     const skill = skillFile("SKILL.md");
-    assert.ok(skill.includes("## Round Boundary"),
-      "the skill must point at the prompt's runtime Round Boundary section");
-    assert.ok(skill.includes("MCP server instructions"),
-      "the skill must point at the server instructions");
+    for (const pointer of [
+      "## Round Boundary",
+      "MCP server instructions",
+      "`submission_guidance`",
+      "`tools/list`",
+      "`initialize`",
+    ]) {
+      assert.ok(skill.includes(pointer), `the skill must point at ${pointer}`);
+    }
     for (const removed of [
       "Before choosing the slice",
       "Make a round larger when",
       "Before each agent-process boundary",
       "outer agent rounds",
       "fresh_round",
+      "A rejection returns a new handle",
+      "must leave an active contract",
+      "up to five reports",
+      "5,000 / 50,000 / 100,000",
     ]) {
       assert.ok(!skill.includes(removed), `skill must not restate: ${removed}`);
     }
     assert.ok(skill.includes("model conversation"),
       "the skill defines clean context as a model conversation");
-    assert.ok(skill.includes("host-runtime restart requirement"),
+    assert.ok(skill.replace(/\s+/g, " ").includes("host-runtime restart requirement"),
       "the skill states clean context is not a host restart");
-    assert.ok(skill.includes("`initialize`") && skill.includes("`tools/list`"),
-      "the skill names the stable MCP channel");
     assert.ok(!skill.includes("carry only the prompt, loopId, session"),
       "the skill must not keep the ambiguous carry-only sentence");
   });
 
-  it("the skill's context examples are legal under the current boundary contract", () => {
-    const skill = skillFile("SKILL.md");
-    const examples = skill.split("\n").filter((line) => line.startsWith("Context: "));
-    assert.ok(examples.length >= 4, "the advertised strategies must be exercised");
-    for (const example of examples) {
-      const fields = example.slice(example.indexOf("(") + 1).split(";");
-      const mode = fields[0]!.trim() as Parameters<typeof promptContextPairIssue>[0]["mode"];
-      const reason = fields[1]!.trim().replace(")", "") as Parameters<typeof promptContextPairIssue>[0]["reason"];
-      assert.equal(promptContextPairIssue({
-        level: "l2", mode, reason, round: 3,
-        attempt: reason === "enforcement_retry" ||
-            reason === "rejection_escalation" ||
-            reason === "invocation_recovery"
-          ? 2
-          : 1,
-      }), null, `advertised strategy is illegal: ${example}`);
+  it("does not copy the runtime context labels into the skill or references", () => {
+    const labels = [
+      formatContextBoundaryLabel("fresh_invocation", "first_round"),
+      formatContextBoundaryLabel("fresh_invocation", "next_round"),
+      formatContextBoundaryLabel("fresh_invocation", "rejection_escalation"),
+      formatContextBoundaryLabel("fresh_invocation", "invocation_recovery"),
+      formatContextBoundaryLabel("same_round_retry", "enforcement_retry"),
+    ];
+    for (const file of [
+      "SKILL.md",
+      "references/recovery-and-views.md",
+      "references/evidence-and-contracts.md",
+    ]) {
+      const text = skillFile(file);
+      for (const label of labels) {
+        assert.ok(!text.includes(label), `${file} copies the runtime label: ${label}`);
+      }
     }
-    assert.ok(skill.includes(formatContextBoundaryLabel(
-      "fresh_invocation", "rejection_escalation",
-    )), "the clean retry example must name rejection escalation");
+    assert.ok(skillFile("references/recovery-and-views.md").includes("contextMode"));
+    assert.ok(skillFile("references/recovery-and-views.md").includes("contextReason"));
   });
 
   it("calls subtask_boundary a subtask boundary, never a workspace checkpoint", () => {
@@ -277,12 +284,20 @@ describe("v4.0.4 — the skill points at the runtime rules", () => {
 
   it("the references do not define a second context/L0 rule set", () => {
     const reference = skillFile("references/recovery-and-views.md");
-    assert.ok(reference.includes("Round Boundary"));
+    assert.ok(reference.includes("contextMode"));
     assert.ok(!reference.includes("fresh_round"));
     assert.ok(!reference.includes("L0 is a same-round retry"));
+    for (const number of [
+      "up to five reports",
+      "5,000 / 50,000 / 100,000",
+      "one report, two assumptions",
+    ]) {
+      assert.ok(!reference.includes(number), `reference still copies ${number}`);
+    }
     const evidence = skillFile("references/evidence-and-contracts.md");
     assert.ok(!evidence.includes("`stop_reason`"));
     assert.ok(!evidence.includes("agent_stop_reason"));
+    assert.ok(!evidence.includes("at most 3, 300 chars"));
     assert.ok(evidence.includes("`outcome`"));
     assert.ok(evidence.includes("`blocker`"));
   });

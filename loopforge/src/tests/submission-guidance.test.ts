@@ -419,45 +419,39 @@ describe("v3.9.2 — compact trigger guidance", () => {
     );
   });
 
-  it("renders the compact block with real criteria at L1", () => {
+  it("renders the minimal block with real claim ids and a guidance pointer", () => {
     const ctx: SelfEvalPromptContext = {
       round: 2,
-      level: "l1",
       activeContract: null,
       itemStatuses: null,
       commands: ["verify"],
       contractVerificationAvailable: true,
       subGoals: [],
-      verificationFlags: [],
-      recovery: false,
       gateEnabled: false,
       criteria: [criterion],
     };
     const block = renderSelfEvalBlock(ctx);
-    assert.match(block, /Optional fields — trigger → field → effect/);
+    assert.match(block, /Optional event fields/);
     assert.match(block, /cr-12345678/);
-    assert.match(block, /All tests pass/);
-    assert.doesNotMatch(block, /<criterion text or cr id from the prompt>/);
-    assert.match(block, /`objective_refinement`/);
+    assert.doesNotMatch(block, /All tests pass/,
+      "the prompt does not repeat the criterion list");
+    assert.match(block, /objective_refinement/);
+    assert.match(block, /submission_guidance/);
   });
 
-  it("keeps L0's field interface complete while its state body stays lean", () => {
+  it("keeps the optional field interface discoverable at every density", () => {
     const ctx: SelfEvalPromptContext = {
       round: 2,
-      level: "l0",
       activeContract: null,
       itemStatuses: null,
       commands: ["verify"],
       contractVerificationAvailable: true,
       subGoals: [],
-      verificationFlags: [],
-      recovery: true,
       gateEnabled: false,
       criteria: [criterion],
     };
     const block = renderSelfEvalBlock(ctx);
     for (const path of [
-      "execution_report.claims",
       "discovered_constraints",
       "wrong_assumptions",
       "open_questions",
@@ -465,8 +459,8 @@ describe("v3.9.2 — compact trigger guidance", () => {
       "worker_results",
       "subtask_boundary",
     ]) {
-      assert.match(block, new RegExp(`\`${path.replace(/\./g, "\\.")}\``),
-        `L0 must offer the applicable field ${path}`);
+      assert.match(block, new RegExp(path.replace(/\./g, "\\.")),
+        `the prompt must name the applicable field ${path}`);
     }
     assert.match(block, /cr-12345678/);
     assert.match(block, /No active Round Contract/);
@@ -488,19 +482,16 @@ describe("v3.9.2 — compact trigger guidance", () => {
     } as NonNullable<SelfEvalPromptContext["activeContract"]>;
     const base: SelfEvalPromptContext = {
       round: 2,
-      level: "l1",
       activeContract,
       itemStatuses: null,
       commands: [],
       contractVerificationAvailable: false,
       subGoals: [],
-      verificationFlags: [],
-      recovery: false,
       gateEnabled: false,
     };
     const noCapability = renderSelfEvalBlock(base);
     assert.match(noCapability,
-      /items cannot be machine-verified this round and no successor is required\./);
+      /cannot be machine-verified and no successor is required/);
     assert.doesNotMatch(noCapability,
       /successor `round_contract` is REQUIRED/);
 
@@ -510,26 +501,23 @@ describe("v3.9.2 — compact trigger guidance", () => {
       contractVerificationAvailable: true,
     });
     assert.match(withCapability,
-      /If this round closes the contract \(every item verified\) and you continue,/);
+      /If this round closes the contract and you continue, a successor/);
     assert.match(withCapability, /successor `round_contract` is REQUIRED/);
   });
 
   it("uses schema placeholders instead of seeding a task-specific contract", () => {
     const ctx: SelfEvalPromptContext = {
       round: 2,
-      level: "l2",
       activeContract: null,
       itemStatuses: null,
       commands: ["verify"],
       contractVerificationAvailable: true,
       subGoals: [],
-      verificationFlags: [],
-      recovery: false,
       gateEnabled: false,
       criteria: [criterion],
     };
     const block = renderSelfEvalBlock(ctx);
-    assert.match(block, /"work_item": "<bounded deliverable this slice produces>"/);
+    assert.match(block, /"work_item": "<bounded deliverable>"/);
     assert.match(block, /"verify_with": \[/);
     assert.match(block, /"verify"/);
     assert.doesNotMatch(block, /"work_item": "All tests pass"/,
@@ -540,37 +528,23 @@ describe("v3.9.2 — compact trigger guidance", () => {
     assert.doesNotMatch(block, /\brci-[a-f0-9]{8}\b/);
   });
 
-  it("makes an L0 committed files mismatch actionable without touching the gate", () => {
+  it("leaves finding fields and actions to the Verification Gate", () => {
     const ctx: SelfEvalPromptContext = {
       round: 2,
-      level: "l0",
       activeContract: null,
       itemStatuses: null,
       commands: ["verify"],
       contractVerificationAvailable: true,
       subGoals: [],
-      verificationFlags: [{
-        severity: "warn",
-        field: "files_changed",
-        check: "evidence_integrity",
-        detail: "Agent files_changed doesn't match evidence: unreported: [a.ts]; unconfirmed: [b.ts]",
-      }],
-      recovery: false,
       gateEnabled: false,
       criteria: [criterion],
     };
     const block = renderSelfEvalBlock(ctx);
-    assert.match(block, /Previous machine findings name these fields/);
-    assert.match(block, /execution_report\.files_changed/);
-    assert.match(block, /→ Action: Report only the net boundary change/);
-    assert.match(block, /add every machine-observed path you omitted/);
-
-    const l1Block = renderSelfEvalBlock({ ...ctx, level: "l1" });
-    assert.doesNotMatch(l1Block, /→ Action: Report only the net boundary change/,
-      "L1/L2 gate actions are not duplicated in the evaluation block");
+    assert.doesNotMatch(block, /Previous machine findings name these fields/);
+    assert.doesNotMatch(block, /→ (Fix|Action):/);
   });
 
-  it("caps criterion display without narrowing validation", () => {
+  it("uses one real claim id and never lists the criteria", () => {
     const criteria = Array.from({ length: 5 }, (_, index) => ({
       ...criterion,
       id: `cr-0000000${index}`,
@@ -578,20 +552,18 @@ describe("v3.9.2 — compact trigger guidance", () => {
     }));
     const ctx: SelfEvalPromptContext = {
       round: 2,
-      level: "l1",
       activeContract: null,
       itemStatuses: null,
       commands: ["verify"],
       contractVerificationAvailable: true,
       subGoals: [],
-      verificationFlags: [],
-      recovery: false,
       gateEnabled: false,
       criteria,
     };
     const block = renderSelfEvalBlock(ctx);
-    assert.match(block, /\+2 more/);
+    assert.match(block, /cr-00000000/);
     assert.doesNotMatch(block, /cr-00000003/);
+    assert.doesNotMatch(block, /Criterion 3/);
   });
 
   it("derives criteria from the operator objective and committed claims", () => {

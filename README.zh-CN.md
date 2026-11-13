@@ -52,7 +52,7 @@ Agent 报告自己认为完成了什么；LoopForge 将这些内容作为声明�
 
 ### 每个新轮次开启新的模型对话
 
-在轮次边界，`fresh_invocation` 会开启新的模型对话；上一轮的 transcript、工具输出和未提交推理不会带入。LoopForge 从当前已提交治理事实、Machine Evidence、有界 Working Memory，以及适用的恢复或重试教训中，明确构建连续性。Agent 报告始终标注为报告，不会变成机器事实。
+在轮次边界，`fresh_invocation` 会开启新的模型对话；上一轮的 transcript、工具输出和未提交推理不会带入。LoopForge 从当前已提交治理事实、Machine Evidence、有界 Working Memory，以及适用的恢复或重试教训中，明确构建连续性。每轮 prompt 是紧凑投影，只带最小提交模板；完整字段事实在实时 `submission_guidance` 中。Agent 报告始终标注为报告，不会变成机器事实。
 
 这是模型对话边界，不是宿主重启或工作区重置。同一个 loop 身份和当前已修改的工作区继续；宿主进程仍可保持 MCP 连接、工具和已安装的 skill 文件可用。`same_round_retry` 可以在原 invocation 中继续，进行同一轮的上下文内修复；上下文策略会明确返回，并且独立于 prompt 密度。只有 rollback 或 recovery 才会恢复检查点。
 

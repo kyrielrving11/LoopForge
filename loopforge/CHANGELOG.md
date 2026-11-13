@@ -1,5 +1,81 @@
 # Changelog
 
+## 4.0.8 (2026-11-13)
+
+**The prompt-density and single-source release.** It removes duplicated prose
+from the per-round prompt, the live `submission_guidance`, and the Forge skill,
+without adding a second template, store, or field source. The Agent still owns
+meaning, decomposition, and action; LoopForge still owns committed facts,
+machine checks, deterministic projections, and persistence.
+
+Schema versions: all unchanged — `PROMPT_ARTIFACT_SCHEMA_VERSION` 12,
+`ROUND_TRANSACTION_SCHEMA_VERSION` 9, `CANONICAL_STATE_SCHEMA_VERSION` 10,
+`POLICY_SCHEMA_VERSION` "10", `CHECKPOINT_SCHEMA_VERSION` 1,
+`GIT_OBSERVATION_SCHEMA_VERSION` 2.
+
+### Measured density
+
+The fixture is the minimal `compileLoop` round described in the plan; counts
+are JS string lengths and exclude stable MCP instructions, tool schemas, and
+host prompts.
+
+- First-round L2 prompt: 7,225 → 3,733 characters (48.3% reduction).
+- Second-round L1 prompt: 7,203 → 4,198 (41.7% reduction).
+- Minimal L0 retry prompt: 5,317 → 3,616 (32.0% reduction).
+- Minimal `submission_guidance` JSON: 5,943 → 4,023 (32.3% reduction).
+- Minimal dynamic payload (prompt + guidance): 13,168 → 7,756 (41.1% reduction).
+- `skills/forge/SKILL.md`: 11,626 → 6,977; the two references: 20,554 → 14,061.
+
+### Prompt and guidance
+
+- The header authority boundary is one compact block for L0/L1/L2. The state
+  file is named once, with its derived-view and stale-hash rule beside it.
+- An identical Objective and Current Task render once as
+  `Objective / Current Task`; exact trim-only equality, no similarity matching.
+- The evaluation block is a minimal core + execution-report template. Optional
+  event fields are named as paths; their when/example/effect stay in the live
+  `submission_guidance`.
+- Contract items and sub-goal rows render only in their protected current-fact
+  sections. The evaluation block names the active contract but does not
+  re-list items or criteria.
+- Verification findings keep every `f-` id, field, detail, and ref; one action
+  per `check` renders in the Verification Gate at every density, including L0.
+- `SubmissionGuidance` keeps its JSON shape and every field/example; only the
+  `when`/`effect` prose was shortened.
+- Machine Evidence renders its authority sentence once per prompt, not once per
+  posture.
+- Corrected the current-user-instruction authority wording: it does not rewrite
+  the working Objective. The working Objective may evolve only through a
+  committed `objective_refinement`; changing Operator Acceptance requires a new
+  loop. The old “a changed objective or acceptance requires a new loop” sentence
+  was too broad and contradicted `objective_refinement`.
+
+### Sources and skill
+
+- `submission-guidance.ts` remains the one field-meaning source;
+  `round-guidance.ts` remains the one round/context prose source.
+- The Forge skill and references are pointer-only: they keep definitions,
+  when-to-use guidance, ID lifetimes, and links to the live prompt,
+  `submission_guidance`, `initialize`/`tools/list`, and MCP server
+  instructions. They no longer copy context labels, handle lifecycle, contract
+  coverage, field tables, Working Memory caps, or prompt ceilings.
+- Tests enforce the pointer-only rule and the no-second-copy rule.
+
+### Internal cleanup
+
+- L1 and L2 share one section renderer; unused render-only parameters and dead
+  nested evaluation schemas were removed.
+- `SelfEvalPromptContext` no longer carries the old `level`,
+  `verificationFlags`, or `recovery` render inputs. The wire shape is unchanged,
+  but this is a source-level break for library callers that constructed that
+  type directly.
+
+Held prompts, artifacts, and submission handles are never rewritten or
+migrated; a held prompt is re-delivered verbatim. New compiles naturally produce
+new prompt hashes and handles. Users with an installed Forge skill can refresh
+the package-owned files with `loopforge init --force`; without `--force`, `init`
+reports stale files and leaves the existing directory untouched.
+
 ## 4.0.7 (2026-11-11)
 
 **The invocation-boundary clarification release.** This release changes no

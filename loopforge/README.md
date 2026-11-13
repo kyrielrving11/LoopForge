@@ -137,23 +137,18 @@ gate. Older history is available through `loopforge_replay` (`start`/`end`;
 default last 10 committed positions, at most 50 in an explicit window) and
 `loopforge_status view: "explain"`.
 
-The four required evaluation fields are `outcome`, `output_summary`,
-`constraint_violations`, and `should_continue`. They are the Agent's report,
-not evidence. `outcome` is one of `success | partial | failed | blocked`;
-`success` requires `should_continue=false`, and `blocked` additionally requires
-a non-empty `blocker`. Optional fields let the Agent report events such as
-changed files, discovered constraints, and one `execution_report.claims`
-channel (`cr-` criterion claims are advisory, `rci-` active-contract item
-claims are strict). `objective_refinement` evolves only the overall working
-objective; it never changes operator acceptance, criteria or hard constraints.
-`subtask_boundary` / `subtask_boundary_label` declare an L2 rehydration boundary;
-they are not a workspace checkpoint. `retroactiveClaims` remains a separate
-free-text claim channel checked against a prior round's Git evidence. LoopForge returns guidance with the real references and
-currently applicable fields, plus a receipt that distinguishes saved reports
-from derived effects and machine verification. Read surfaces use
-`agentSuccessClaim`/`agentOutcome` for the Agent's claim and
-`evidencePosture`/`machineBackedSuccess` for machine facts; they are never
-merged. Optional fields are not a completion checklist.
+The per-round prompt is deliberately compact: one authority boundary, the
+current governance facts, one minimal evaluation template, and one Round
+Boundary footer. Optional-field details, real ids, legal shapes, and usable
+commands stay in the live `submission_guidance`; the stable
+`initialize`/`tools/list` surface is not repeated every round.
+
+The live `submission_guidance` and the `loopforge_next` tool schema are the
+authoritative field interface. The prompt carries the four core fields and a
+minimal execution-report template; an optional event field is included only
+when its event actually happened. Read surfaces keep Agent claims
+(`agentOutcome`, `agentSuccessClaim`) separate from machine facts
+(`evidencePosture`, `machineBackedSuccess`); they are never merged.
 
 The server also provides status, stop, pause, resume, and replay tools. Two gate
 tools are available only when `policy.gate.enabled` is true. See the MCP tool
@@ -229,8 +224,9 @@ is compiled from committed facts. Prompts, status views, replay, audit, explain,
 and the optional state file are read or derived views. The state file is
 regenerable and is not a second source of truth.
 
-The prompt contains current governance facts, compact Machine Evidence, and a
-bounded Agent-report Working Memory. It is not a replay of external memory or
+The prompt contains current governance facts, compact Machine Evidence, a
+bounded Agent-report Working Memory, and a minimal evaluation template; field
+details stay in `submission_guidance`. It is not a replay of external memory or
 an unbounded conversation summary. LoopForge does not execute the coding task,
 automatically plan or decompose it, or guarantee task completion.
 

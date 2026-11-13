@@ -13,7 +13,6 @@ import { deriveConfiguredCapability, getPolicy, } from "./policy.js";
 import { deriveRoundFacts, NO_IN_FLIGHT_ROUND } from "./round-facts.js";
 import { deriveCriterionStatuses } from "./criterion-status.js";
 import { deriveSubGoals } from "./subgoal-state.js";
-import { verificationActionFor } from "./verification-actions.js";
 import { deriveContractRequirement } from "./contract-requirement.js";
 /** Field order used by the prompt, guidance and receipts. Core fields first,
  *  then the execution report, then contract/sub-goal state, then the
@@ -54,11 +53,9 @@ const GUIDES = [
     {
         path: "outcome",
         purpose: "The ONE round conclusion.",
-        when: "Every round. success requires should_continue=false; blocked requires " +
-            "should_continue=false and a blocker; partial/failed may continue or stop.",
+        when: "Every round; success/blocked must stop, blocked also needs a blocker.",
         nature: "claim",
-        downstream: "Stop decision, success trajectory, verification posture, and every read " +
-            "surface. It is a claim; a machine observation is what backs it.",
+        downstream: "Stop/success trajectory; a claim, not evidence.",
         toolDescription: "Required. success | partial | failed | blocked. success requires " +
             "should_continue=false; blocked requires should_continue=false and a " +
             "non-empty blocker. partial/failed may continue or stop. This is the ONE " +
@@ -70,8 +67,7 @@ const GUIDES = [
         purpose: "What was actually done this round, not what was attempted.",
         when: "Every round.",
         nature: "report",
-        downstream: "Committed record, state file, audit/replay/explain, and backtrack " +
-            "failed-approach facts — never machine evidence or a current-prompt narrative.",
+        downstream: "Committed record; never machine evidence.",
         toolDescription: "Specific, actionable summary of what was DONE this round — not what was " +
             "attempted. Do not restate the plan.",
         core: true,
@@ -80,9 +76,9 @@ const GUIDES = [
         path: "constraint_violations",
         array: true,
         purpose: "Hard constraints actually violated this round.",
-        when: "Every round; empty when none were violated.",
+        when: "Every round; empty when none.",
         nature: "report",
-        downstream: "Recurring-violation detection and constraint retirement.",
+        downstream: "Recurring detection/retirement.",
         toolDescription: "Constraints the agent actually violated this round, preferably by the " +
             "c-XXXXXXXX id the prompt rendered. Empty when none. Be honest.",
         core: true,
@@ -90,9 +86,9 @@ const GUIDES = [
     {
         path: "should_continue",
         purpose: "Whether the loop should advance to another round.",
-        when: "Every round. false only when the ENTIRE task is complete or the agent must stop.",
+        when: "Every round; false only when the whole task is complete or a stop is required.",
         nature: "control",
-        downstream: "Stop decision. Partial progress is still true.",
+        downstream: "Controls the next round; partial progress is true.",
         toolDescription: "false ONLY when the ENTIRE task is complete or a stop is required. " +
             "Partial progress = true.",
         core: true,
@@ -102,9 +98,9 @@ const GUIDES = [
         array: true,
         purpose: "The boundary net change: paths whose content or file type differs between " +
             "round preparation and this submission, including deleted paths.",
-        when: "Every round that changed the workspace. A commit alone adds no entry when content is unchanged.",
+        when: "When the workspace changed; a commit alone adds nothing.",
         nature: "report",
-        downstream: "Compared with the machine boundary delta; never trusted as the observation.",
+        downstream: "Compared with machine boundary; not observation.",
         toolDescription: "Paths whose content or file type differs between round start and this " +
             "submission, including deletions. A commit alone does not add a path when " +
             "content is unchanged. Gitignored paths are outside the machine boundary — " +
@@ -115,10 +111,9 @@ const GUIDES = [
         path: "execution_report.claims",
         array: true,
         purpose: "Claims about objective criteria and ACTIVE contract items, in one channel.",
-        when: "When you want to declare which criteria or active contract items are met " +
-            "or still remaining; cite real cr-/rci- ids from this prompt.",
+        when: "When declaring criteria or active items met/remaining; cite real " +
+            "cr-/rci- ids from this prompt.",
         nature: "claim",
-        decision: "Claim criteria or active contract items with their real cr-/rci- ids",
         compact: true,
         promptRank: 10,
         downstream: "`cr-` advisory; `rci-` strict; only machine commands verify.",
@@ -134,13 +129,11 @@ const GUIDES = [
         path: "objective_refinement",
         purpose: "The Agent's working version of the OVERALL starting objective — not the " +
             "current round, not the contract.",
-        when: "Only when the overall objective genuinely evolved. Omit when unchanged; " +
-            "this is event-driven, not a per-round field.",
+        when: "Only when the overall objective genuinely evolved; omit when unchanged.",
         nature: "report",
-        decision: "Overall objective genuinely evolved (omit when unchanged)",
         compact: true,
         promptRank: 15,
-        downstream: "Updates the working objective text; never acceptance, criteria or constraints.",
+        downstream: "Working objective text only; never acceptance/criteria.",
         toolDescription: "Optional, at most 1000 chars. A refined statement of the OVERALL " +
             "starting objective when understanding genuinely changed. It never " +
             "rewrites the operator acceptance, criteria or hard constraints, and it " +
@@ -150,10 +143,9 @@ const GUIDES = [
         path: "subgoal_updates",
         array: true,
         purpose: "Explicit status transitions for existing sub-goals.",
-        when: "When an active sg-XXXXXXXX sub-goal starts, is blocked, completes, or is canceled.",
+        when: "When an active sg- id starts, blocks, completes or is canceled.",
         nature: "transition",
-        decision: "An active sub-goal moved status; cite its real sg- id",
-        downstream: "Sub-goal state derived from committed rounds; done/canceled are terminal.",
+        downstream: "Derived sub-goal state; done/canceled are terminal.",
         toolDescription: "Explicit status transitions for EXISTING sub-goals. Each entry references " +
             "an ACTIVE sg-XXXXXXXX id from the prompt. Unknown ids, done/canceled " +
             "(terminal) references, and illegal migrations are evaluation_invalid. " +
@@ -164,13 +156,11 @@ const GUIDES = [
         path: "emerged_subtasks",
         array: true,
         purpose: "New execution-plan work that the active criteria/contract do not already cover.",
-        when: "Only when new work appears or an existing work item must be split. Zero " +
-            "is correct when the current criteria/contract already cover the round.",
+        when: "Only when new work appears or a work item must split; zero is valid.",
         nature: "transition",
-        decision: "A new sub-problem surfaced (plain text, never sg- ids)",
         compact: true,
         promptRank: 40,
-        downstream: "The only sub-goal creation channel; the runtime derives stable sg- ids.",
+        downstream: "Only sub-goal creation channel; ids derived.",
         toolDescription: "New work that surfaced during execution and was not already covered by " +
             "the active criteria or current contract. The ONLY sub-goal creation " +
             "channel. Plain descriptions, never sg-XXXXXXXX ids. Do not restate the " +
@@ -180,14 +170,11 @@ const GUIDES = [
         path: "discovered_constraints",
         array: true,
         purpose: "New constraints that later rounds must respect.",
-        when: "When this round discovered a limit that was not known before.",
+        when: "When this round found a limit not known before.",
         nature: "report",
-        decision: "You discovered a limit later rounds must respect",
         compact: true,
         promptRank: 20,
-        downstream: "Merged into the active constraint set by the compiler; entries over " +
-            "max_discovered_constraints_per_round are diagnosed and dropped at the " +
-            "submission boundary.",
+        downstream: "Merged into active constraints; over-limit dropped.",
         toolDescription: "New constraints that must apply to later rounds. This is the ONLY " +
             "promotion channel for a worker-discovered constraint: a worker result " +
             "stays a report until the main agent states the constraint here.",
@@ -196,14 +183,11 @@ const GUIDES = [
         path: "wrong_assumptions",
         array: true,
         purpose: "Assumptions from earlier rounds that this round falsified.",
-        when: "When evidence proved an earlier assumption wrong; omit when none.",
+        when: "When evidence falsified an earlier assumption; omit when none.",
         nature: "report",
-        decision: "Evidence falsified an earlier assumption",
         compact: true,
         promptRank: 30,
-        downstream: "Bounded Working Memory (fresh prompts and the committed projection), " +
-            "recovery brief, replay and explain. Only committed reports reach the " +
-            "next prompt.",
+        downstream: "Working Memory/replay; only committed reports reach later prompts.",
         toolDescription: "Assumptions from earlier rounds that turned out to be wrong. Record one " +
             "only when this round actually falsified it; otherwise omit. This is not " +
             "a reflection quota.",
@@ -213,16 +197,12 @@ const GUIDES = [
         array: true,
         purpose: "Unresolved questions that still affect later slices (a question list, " +
             "not a todo list).",
-        when: "Only when a real open question affects how later work should proceed; " +
-            "omit when none.",
+        when: "Only when a real question affects later work; omit when none.",
         nature: "report",
         reportOnly: true,
-        decision: "A question remains open that later slices must resolve",
         compact: true,
         promptRank: 35,
-        downstream: "Bounded Working Memory (fresh prompts and the committed projection), " +
-            "replay and explain. Strictly report-only: it never enters the " +
-            "verification gate, success, contract closure or machine evidence.",
+        downstream: "Report-only; Working Memory/replay, never a gate.",
         toolDescription: "Optional. At most 3 unresolved questions, 300 chars each. Record only " +
             "questions that still affect later slices — not a todo list, not a " +
             "completion checklist, and not a substitute for a blocker or decision. " +
@@ -232,13 +212,12 @@ const GUIDES = [
         path: "resolved_open_question_ids",
         array: true,
         purpose: "Open-question ids that this round resolved.",
-        when: "When a previously rendered open question is no longer unresolved.",
+        when: "When a rendered open question is resolved.",
         nature: "report",
         reportOnly: true,
-        decision: "A rendered open question was resolved",
         compact: true,
         promptRank: 36,
-        downstream: "Working Memory removes the cited question; replay and explain retain the report.",
+        downstream: "Removes question from Working Memory.",
         toolDescription: "Optional. Use only stable oq-... ids rendered beside open questions in " +
             "Working Memory or the state file. Report-only; it never changes the " +
             "verification gate or acceptance criteria.",
@@ -249,10 +228,7 @@ const GUIDES = [
         purpose: "Existing constraints that are no longer correct or relevant.",
         when: "When a prior constraint is proven wrong or obsolete.",
         nature: "report",
-        downstream: "Only active Agent-discovered constraints (including recovery-preserved " +
-            "discoveries) are retractable, by c-XXXXXXXX id or normalized-exact text. " +
-            "Operator criteria/hard constraints and plan constraints are rejected. " +
-            "Unknown/inactive targets are no-ops with a diagnostic.",
+        downstream: "Only active Agent-discovered constraints; operator/plan immutable.",
         toolDescription: "Optional. Active Agent-discovered constraints that are no longer valid, " +
             "by c-XXXXXXXX id or exact text. Operator criteria/hard constraints and " +
             "plan constraints cannot be retracted. Omit when none.",
@@ -261,16 +237,11 @@ const GUIDES = [
         path: "round_contract",
         purpose: "THE contract channel: the NEXT round's bounded deliverable and its " +
             "acceptance conditions.",
-        when: "When contract coverage requires a next-round contract, or when you want " +
-            "to start or replace a slice. With after-capable commands, a continuing " +
-            "round with a successor available must leave an active contract; omit to " +
-            "continue the current one. The final configured round has no successor.",
+        when: "When coverage requires a next-round contract, or you start/replace a " +
+            "slice; omit to continue the current one.",
         nature: "proposal",
-        decision: "The Agent decides the next slice; LoopForge only validates the declaration",
-        downstream: "Becomes active only after this round commits; item ids rci-XXXXXXXX are " +
-            "derived by the runtime. `scope` is a report-only intent statement and " +
-            "never rejects or blocks a round. `supersedes` closes the named ACTIVE " +
-            "contract as `superseded` and activates this proposal next round.",
+        downstream: "Active after this round commits; rci- ids are derived. `scope` is " +
+            "report-only; `supersedes` closes the named active contract.",
         toolDescription: "THE contract channel for the NEXT round. work_item is the bounded " +
             "deliverable this slice produces (an outcome, not an activity) and is " +
             "required for a new proposal. items are acceptance conditions; each item " +
@@ -292,11 +263,9 @@ const GUIDES = [
         purpose: "Results of sub-agent / worker delegations.",
         when: "Only when work was actually delegated.",
         nature: "report",
-        decision: "You delegated work",
         compact: true,
         promptRank: 50,
-        downstream: "Saved inside the committed transaction as an audit report. A worker " +
-            "finding is not auto-promoted.",
+        downstream: "Audit report; never auto-promoted.",
         toolDescription: "Optional. Results of sub-agent / Worker delegations this round. Each " +
             "entry must declare an outcome. Entries without a valid outcome are " +
             "dropped with a diagnostic. To make a worker finding a global " +
@@ -308,10 +277,9 @@ const GUIDES = [
         purpose: "Mark a meaningful work boundary.",
         when: "At a subtask boundary that warrants an L2 rehydration.",
         nature: "report",
-        decision: "This round reached a real phase boundary; pair with subtask_boundary_label",
         compact: true,
         promptRank: 60,
-        downstream: "Forces an L2 rehydration boundary. It creates no milestone or phase narrative.",
+        downstream: "Forces L2 rehydration.",
         toolDescription: "Optional. true at a subtask boundary to force an L2 rehydration boundary. " +
             "Pair with subtask_boundary_label.",
     },
@@ -320,7 +288,7 @@ const GUIDES = [
         purpose: "A human-readable label for the subtask boundary.",
         when: "Only together with subtask_boundary=true.",
         nature: "report",
-        downstream: "Stored on the committed report; it does not create a later prompt heading.",
+        downstream: "Stored on the report.",
         toolDescription: "Optional. Short label for the subtask boundary (for example " +
             "'core-model-complete'). Meaningful only when subtask_boundary=true.",
     },
@@ -330,7 +298,7 @@ const GUIDES = [
         purpose: "A claim that an earlier round satisfied a criterion.",
         when: "When you can point at an earlier round's evidence.",
         nature: "claim",
-        downstream: "Advisory check against the named round's committed delta; never upgrades a criterion.",
+        downstream: "Advisory check; never upgrades a criterion.",
         toolDescription: "Optional. Claims that a PRIOR round satisfied a criterion. The runtime " +
             "checks them against that round's committed evidence and warns when the " +
             "claim is unbacked. Advisory: it never upgrades a criterion by itself.",
@@ -339,9 +307,9 @@ const GUIDES = [
         path: "gate_ids",
         array: true,
         purpose: "Approved gate ids this round's work depended on.",
-        when: "Only when policy.gate.enabled is true and an approval was actually obtained.",
+        when: "Only when the gate layer is enabled and an approval was obtained.",
         nature: "control",
-        downstream: "Checked only when the gate layer is enabled; otherwise saved as an unused report.",
+        downstream: "Checked only when gate enabled.",
         toolDescription: "Optional. Approved loopforge_gate_check ids this round depended on. " +
             "Enforced only when policy.gate.enabled: a cited, unapproved gate rejects " +
             "the round. Without the gate layer this is saved but has no effect.",
@@ -351,8 +319,7 @@ const GUIDES = [
         purpose: "A concrete description of what blocks the work.",
         when: "Required when outcome=blocked; ignored (with a diagnostic) otherwise.",
         nature: "report",
-        downstream: "Stop reason, blocked-contract closure, and gate classification when enabled. " +
-            "When work needs human input, say so here with outcome=blocked.",
+        downstream: "Stop reason; blocked-contract closure.",
         toolDescription: "Required when outcome=blocked (trim non-empty, at most 500 chars). State " +
             "what cannot proceed and why. When another outcome is declared it is " +
             "dropped with a diagnostic and never rejects the round.",
@@ -360,10 +327,9 @@ const GUIDES = [
     {
         path: "no_change_reason",
         purpose: "Why a success claim needs no workspace change.",
-        when: "Only when no enabled verification command is configured and the round " +
-            "genuinely required no change.",
+        when: "Only when no verification command is configured and no change was needed.",
         nature: "report",
-        downstream: "Downgrades the unbacked-success check from warn to info; never creates evidence.",
+        downstream: "Warn to info; never evidence.",
         toolDescription: "Optional. Reason for claiming success with no machine-verifiable change " +
             "(for example a documentation-only round). Honored only when no enabled " +
             "verification command is configured. Never excuses an open contract.",
@@ -421,11 +387,10 @@ function firstActiveSubGoal(subGoals) {
 export function fieldExample(path, ctx) {
     switch (path) {
         case "outcome": return "partial";
-        case "output_summary": return "<what was done and how it was verified>";
+        case "output_summary": return "<what was done and verified>";
         case "constraint_violations": return [];
         case "should_continue": return true;
-        case "execution_report.files_changed":
-            return ["<path whose content or type differs from round start>"];
+        case "execution_report.files_changed": return ["<path>"];
         case "execution_report.claims": {
             const item = firstActiveItem(ctx.activeContract);
             if (item)
@@ -434,30 +399,30 @@ export function fieldExample(path, ctx) {
             return criterion ? [{ id: criterion.id, outcome: "met" }] : null;
         }
         case "objective_refinement":
-            return "<the overall objective as it now stands>";
+            return "<refined objective>";
         case "subgoal_updates": {
             const subGoal = firstActiveSubGoal(ctx.activeSubGoals);
             return subGoal ? [{ id: subGoal.id, status: "done" }] : null;
         }
         case "emerged_subtasks":
-            return ["<a new sub-problem that surfaced>"];
+            return ["<new sub-problem>"];
         case "discovered_constraints":
-            return ["<a constraint later rounds must respect>"];
+            return ["<new constraint>"];
         case "wrong_assumptions":
-            return ["<an assumption from an earlier round that was falsified>"];
+            return ["<falsified assumption>"];
         case "open_questions":
-            return ["<an unresolved question that still affects later slices>"];
+            return ["<open question>"];
         case "resolved_open_question_ids":
-            return ["oq-<stable id rendered for a question>"];
+            return ["oq-<rendered id>"];
         case "retracted_constraints":
-            return ["<constraint text or c-XXXXXXXX id that is no longer valid>"];
+            return ["<c- id or exact text>"];
         case "round_contract": {
             if (!ctx.contractVerificationAvailable || ctx.commands.length === 0)
                 return null;
             return {
-                work_item: "<bounded deliverable this slice produces>",
+                work_item: "<bounded deliverable>",
                 items: [{
-                        description: "<machine-checkable acceptance condition>",
+                        description: "<acceptance condition>",
                         criterion_refs: [],
                         verify_with: [ctx.commands[0]],
                     }],
@@ -466,18 +431,18 @@ export function fieldExample(path, ctx) {
         case "worker_results":
             return [{
                     agentId: "<worker id>",
-                    subTask: "<self-contained subtask you delegated>",
-                    resultSummary: "<what the worker reported>",
+                    subTask: "<delegated subtask>",
+                    resultSummary: "<worker report>",
                     outcome: "success",
                 }];
         case "subtask_boundary": return false;
         case "subtask_boundary_label": return "<short phase label>";
         case "retroactiveClaims":
-            return [{ round: 1, claim: "<what that earlier round satisfied>" }];
+            return [{ round: 1, claim: "<satisfied condition>" }];
         case "gate_ids":
-            return ["<approved gateId from loopforge_gate_check>"];
+            return ["<approved gateId>"];
         case "blocker": return "<what cannot proceed and why>";
-        case "no_change_reason": return "<why no workspace change was needed>";
+        case "no_change_reason": return "<why no change was needed>";
         default: return null;
     }
 }
@@ -540,7 +505,9 @@ function renderContractGuidance(ctx) {
     const hasCommand = ctx.contractVerificationAvailable && ctx.commands.length > 0;
     // v4.0.6: coverage guidance uses the SAME shared rule as the submission
     // boundary and the post-evidence gate. `proposalPresent:false` describes
-    // this prompt (no next-round proposal has been committed yet).
+    // this prompt (no next-round proposal has been committed yet). The current
+    // contract's items already render in Current Task / Active Round Contract;
+    // this block only states the decision rule.
     const requirement = deriveContractRequirement({
         shouldContinue: true,
         blocked: false,
@@ -552,46 +519,34 @@ function renderContractGuidance(ctx) {
     });
     if (contract) {
         const lines = [
-            "Active Round Contract — it governs this round:",
-            `- Deliverable: ${contract.work_item ?? "(not named; legacy contract)"} (${contract.id})`,
+            `Active contract \`${contract.id}\`: omit \`round_contract\` to continue ` +
+                "it unchanged; to replace it, add `round_contract.supersedes` with " +
+                "that id and different acceptance items.",
         ];
-        const shown = contract.items.slice(0, 5);
-        for (const item of shown) {
-            const status = statusOfItem(item.id, ctx.itemStatuses);
-            const commands = item.verify_with.join(", ") || "<none>";
-            lines.push(`  - [${item.id}] ${item.description} — ${status}; verify via: ${commands}`);
-        }
-        if (contract.items.length > shown.length) {
-            lines.push(`  - … and ${contract.items.length - shown.length} more in the Current Task.`);
-        }
-        const claimDecision = GUIDE_BY_PATH.get("execution_report.claims")?.decision
-            ?? "Claim criteria or active contract items with their real cr-/rci- ids";
-        lines.push(`${claimDecision} via \`execution_report.claims\`.`, "A claim alone leaves an item insufficient; its bound command must be observed", "passing. Omit `round_contract` to CONTINUE this contract unchanged — a", "different proposal without `supersedes` is rejected as contract_premature.", "To replace this slice, add `round_contract.supersedes` with", `{ contract_id: "${contract.id}" } and DIFFERENT acceptance items in the`, "same proposal. The old contract closes as superseded, its unverified items", "remain in the audit record, the workspace is not restored, and this round", "cannot be completed.", "`scope` is your declared intent — a report, not permission. It is not", "enforced and it is not part of the rc- id.");
         if (requirement.reason === "no_contract_capability") {
-            lines.push("No enabled after-capable command is configured now, so this contract's", "items cannot be machine-verified this round and no successor is required.");
+            lines.push("No enabled after-capable command is configured, so its items cannot " +
+                "be machine-verified and no successor is required.");
         }
         else if (requirement.reason === "no_successor_round") {
-            lines.push("This is the final configured round. Do not submit a successor " +
-                "round_contract; there is no next round to consume it.");
+            lines.push("This is the final configured round; do not submit a successor " +
+                "`round_contract`.");
         }
         else if (requirement.reason === "active_contract_closed") {
-            lines.push("This contract is already closed. If you continue, a successor", "`round_contract` is REQUIRED for the next round.");
+            lines.push("This contract is already closed; if you continue, a successor " +
+                "`round_contract` is REQUIRED for the next round.");
         }
         else {
-            lines.push("If this round closes the contract (every item verified) and you continue,", "a successor `round_contract` is REQUIRED for the next round.");
+            lines.push("If this round closes the contract and you continue, a successor " +
+                "`round_contract` is REQUIRED for the next round.");
         }
         return lines;
     }
     if (requirement.reason === "no_contract_capability") {
-        return [
-            "No enabled after-capable evidence command is configured — no contract is possible.",
-            "If the OVERALL starting objective genuinely evolved, submit `objective_refinement`.",
-        ];
+        return ["No after-capable evidence command — no contract is possible."];
     }
     if (requirement.reason === "no_successor_round") {
         return [
-            "This is the final configured round. Do not submit `round_contract`;",
-            "there is no successor round to consume a proposal.",
+            "This is the final configured round; do not submit `round_contract`.",
         ];
     }
     const commands = ctx.commands.slice(0, 3).join(", ");
@@ -603,9 +558,8 @@ function renderContractGuidance(ctx) {
         criteria: ctx.criteria,
     });
     return [
-        "No active Round Contract. If you continue, one is REQUIRED for the next",
-        "round. You decide the slice and acceptance conditions; LoopForge validates",
-        "structure, references and command bindings. Legal shape:",
+        "No active Round Contract. If you continue, one is REQUIRED for the next " +
+            "round. Legal shape:",
         "```json",
         JSON.stringify({ round_contract: example }, null, 1),
         "```",
@@ -613,42 +567,17 @@ function renderContractGuidance(ctx) {
     ];
 }
 function renderSubGoalGuidance(ctx) {
-    const active = ctx.subGoals.filter((item) => item.status !== "done" && item.status !== "canceled");
-    if (active.length === 0)
+    if (!firstActiveSubGoal(ctx.subGoals))
         return [];
-    const shown = active.slice(0, 5);
-    const updateDecision = GUIDE_BY_PATH.get("subgoal_updates")?.decision
-        ?? "An active sub-goal moved status; cite its real sg- id";
     return [
-        "Active sub-goals — update only with their real ids:",
-        ...shown.map((item) => `- [${item.id}] ${item.description} — ${item.status}`),
-        `${updateDecision} via \`subgoal_updates\`; done/canceled are terminal.`,
+        "Update sub-goal status only with a real `sg-` id via `subgoal_updates`; " +
+            "done/canceled are terminal.",
     ];
 }
-const CRITERIA_DISPLAY_LIMIT = 3;
-const CRITERIA_TEXT_LIMIT = 80;
-function clipCriterionText(text) {
-    const collapsed = text.trim().replace(/\s+/g, " ");
-    return collapsed.length > CRITERIA_TEXT_LIMIT
-        ? collapsed.slice(0, CRITERIA_TEXT_LIMIT - 3) + "..."
-        : collapsed;
-}
-function criteriaDetailLines(criteria) {
-    if (criteria.length === 0)
-        return [];
-    const shown = criteria.slice(0, CRITERIA_DISPLAY_LIMIT);
-    const more = criteria.length - shown.length;
-    const detail = shown
-        .map((criterion) => `\`${criterion.id}\` "${clipCriterionText(criterion.text)}" (${criterion.status})`)
-        .join("; ");
-    return [
-        `  Real criteria: ${detail}${more > 0 ? `; +${more} more in the objective.` : "."}`,
-    ];
-}
-/** The compact decision checklist. Only fields whose trigger facts are known
- *  or whose event is a conditional opportunity are rendered; the full
- *  per-field shapes remain in `submission_guidance`. */
-function renderCompactTriggers(ctx) {
+/** The prompt names the optional paths; their when/example/effect stay in the
+ *  live `submission_guidance`. This keeps the prompt a current-fact surface,
+ *  not a second field manual. */
+function renderOptionalPaths(ctx) {
     const facts = {
         activeContract: ctx.activeContract,
         itemStatuses: ctx.itemStatuses,
@@ -658,81 +587,19 @@ function renderCompactTriggers(ctx) {
         gateEnabled: ctx.gateEnabled === true,
         criteria: ctx.criteria ?? [],
     };
-    const paths = promptedFieldPaths(facts);
+    const paths = promptedFieldPaths(facts)
+        .filter((path) => path !== "execution_report.claims");
     if (paths.length === 0)
         return [];
-    const lines = [
-        "Optional fields — trigger → field → effect. Include a field ONLY when its",
-        "trigger actually happened; omitting any of them is always correct. Legal",
-        "shapes: see the `submission_guidance` field in the round response.",
+    return [
+        "Optional event fields (only when the event happened): " +
+            paths.join(", ") +
+            ". Their when/example/effect are in `submission_guidance`.",
     ];
-    for (const path of paths) {
-        const guide = GUIDE_BY_PATH.get(path);
-        if (!guide?.decision)
-            continue;
-        lines.push(`- ${guide.decision} → \`${path}\` → ${guide.downstream}`);
-        if (path === "execution_report.claims") {
-            lines.push(...criteriaDetailLines(ctx.criteria ?? []));
-        }
-    }
-    return lines;
 }
-/** Verification flags name the concrete evaluation field, which is often the
- *  dotted path the Agent must fill. Normalize the legacy short names before
- *  the guidance lookup so the prompt always names the real field. */
-const FLAG_FIELD_PATHS = {
-    files_changed: "execution_report.files_changed",
-    claims: "execution_report.claims",
-    criterion_claims: "execution_report.claims",
-    contract_item_claims: "execution_report.claims",
-};
-function flagFieldPath(field) {
-    return FLAG_FIELD_PATHS[field] ?? field;
-}
-function renderFlagGuidance(flags, criteria = [], level = "l1") {
-    if (flags.length === 0)
-        return [];
-    const fields = [
-        ...new Set(flags.map((flag) => flagFieldPath(flag.field)).filter(Boolean)),
-    ];
-    const lines = [
-        "Previous machine findings name these fields:",
-        ...fields.slice(0, 8).map((field) => {
-            const guide = GUIDE_BY_PATH.get(field);
-            return `- \`${field}\`${guide ? ` — ${guide.purpose}` : ""}`;
-        }),
-    ];
-    // L0's Verification Gate deliberately stays compact and carries no action
-    // continuation. The evaluation block is the Agent's composition surface,
-    // so the concrete action belongs here. L1/L2 already render it once in the
-    // gate; do not duplicate it.
-    if (level === "l0") {
-        const actions = new Map();
-        for (const flag of flags) {
-            if (flag.severity === "info" || actions.has(flag.check))
-                continue;
-            actions.set(flag.check, {
-                label: flag.severity === "error" ? "Fix" : "Action",
-                action: verificationActionFor(flag.check),
-            });
-            if (actions.size >= 3)
-                break;
-        }
-        for (const [check, entry] of actions) {
-            lines.push(`  → ${entry.label}: ${entry.action} [${check}]`);
-        }
-    }
-    const criterionFinding = flags.some((flag) => flag.field === "execution_report.claims" ||
-        flag.field === "criterion_claims" ||
-        flag.check === "criteria_claims_unverified" ||
-        flag.check === "success_with_remaining_criteria");
-    if (criterionFinding && criteria.length > 0) {
-        lines.push(...criteriaDetailLines(criteria));
-    }
-    lines.push("Correct the relevant field(s) in this round if the finding still applies.", "If this attempt falsified an earlier assumption, record it in", "`wrong_assumptions`; otherwise omit it.");
-    return lines;
-}
-/** Render the evaluation block appended to every prompt. */
+/** Render the minimal evaluation block appended to every prompt. The full
+ *  field interface (when/example/effect) stays in `submission_guidance`; this
+ *  block is self-sufficient for the core fields and the execution report. */
 export function renderSelfEvalBlock(ctx) {
     const base = {
         outcome: "partial",
@@ -750,32 +617,26 @@ export function renderSelfEvalBlock(ctx) {
     const lines = [
         "### LoopForge Evaluation (Required)",
         "",
-        `After completing Round ${ctx.round}, submit one evaluation to ` +
-            "`loopforge_next.evaluation`.",
-        "",
-        "Base (always):",
+        "Base:",
         "```json",
-        JSON.stringify(base, null, 2),
+        JSON.stringify(base),
         "```",
-        "Add the execution report when files changed or you claim items:",
+        "Execution report (when files changed or you claim items):",
         "```json",
         JSON.stringify({
             execution_report: {
                 files_changed: fieldExample("execution_report.files_changed", reportCtx),
                 claims: fieldExample("execution_report.claims", reportCtx) ?? [],
             },
-        }, null, 1),
+        }),
         "```",
-        "`files_changed` is the net change from round start, including deletions.",
-        "A commit alone adds nothing; gitignored paths are outside the machine boundary.",
+        "`files_changed` is net change from round start, including deletions; " +
+            "a commit adds nothing.",
     ];
-    lines.push(...renderCompactTriggers(ctx));
+    lines.push(...renderOptionalPaths(ctx));
     lines.push(...renderContractGuidance(ctx));
     lines.push(...renderSubGoalGuidance(ctx));
-    if (ctx.recovery || ctx.verificationFlags.length > 0) {
-        lines.push(...renderFlagGuidance(ctx.verificationFlags, ctx.criteria ?? [], ctx.level));
-    }
-    lines.push("Never invent an id; use only ids rendered here or in `submission_guidance`", "and omit the field when an id is absent.");
+    lines.push("Never invent an id; use only ids rendered here or in `submission_guidance`.");
     return lines.join("\n");
 }
 function activeSubGoals(subGoals) {

@@ -1,56 +1,36 @@
 # Recovery, Prompt Levels, and Read-Only Views
 
-This reference explains concepts and flows. The live `submission_guidance`
-remains the only source for field applicability, legal shapes, real ids, and
-usable commands.
+This reference explains concepts and flows. The live prompt,
+`submission_guidance`, and the `tools/list` schema are authoritative for
+applicability, legal shapes, real ids, limits, and usable commands. This file
+is not a second rule set.
 
 ## Backtrack and Agent recovery
 
-A progress stall requires observable Git history over the lookback window. Only
-the Git workspace coverage participates: a custom evidence provider's
-changed/unknown facts are recorded and displayed but cannot prevent a stall or
-keep the prompt at L1. Committed work counts as motion through the Git HEAD
-change, even when the closing worktree is clean, and the round you are
-submitting counts too: if it moved files or committed, it cancels the verdict.
-If machine history cannot be read, no stall verdict is made.
+LoopForge can trigger a machine backtrack when a configured rule requires it.
+The Agent may also deliberately abandon the current branch by submitting a
+top-level `recovery` instead of an `evaluation`, using the current
+`submissionHandle`. The live tool schema states the required fields.
 
-LoopForge can trigger a machine backtrack when a rule requires it. The Agent may
-also abandon the current branch deliberately by submitting a top-level
-`recovery: { target_checkpoint_id, reason }` instead of an `evaluation`, using
-the current `submissionHandle`.
+Recovery is an action, not an evaluation. It is not a success claim, and the
+target is recovery material rather than proof of progress. LoopForge commits
+the rollback directive, executes the restore itself, verifies the complete Git
+boundary and recorded HEAD, then compiles the redo prompt. A failed restore
+leaves the directive pending and the session stalled; `resume` retries the same
+directive. A restore is not round progress and never satisfies a redo-time
+verification check.
 
-Recovery is an action, not an evaluation:
-
-- it requires none of the four core evaluation fields;
-- it requires the current handle and a non-empty reason;
-- the target must resolve to a checkpoint ref visible through the held
-  transaction or a committed evaluation transaction on the current branch;
-- error-level verification findings on the target round do not disqualify it,
-  because it is recovery material, not a success claim;
-- the reason is recorded verbatim and rendered in the Recovery Brief as
-  report-only text, never as a LoopForge instruction.
-
-LoopForge commits the rollback directive, executes the restore itself, verifies
-the complete Git fingerprint boundary and recorded HEAD, then compiles the redo
-prompt. A failed restore leaves the directive pending, sets the session to
-`stalled`, and `resume` retries the SAME directive. The directive survives the
-redo as an audit event. A restore is not round progress and never satisfies a
-redo-time verification check.
-
-When backtrack occurs:
-
-1. Read the protected Recovery Brief and the current prompt. Do not restore the
-   workspace yourself: LoopForge already did, and re-running git reset/stash/
-   checkout would move outside the verified target.
-2. The redo prompt is already compiled from the verified post-restore baseline.
-   Submit its work and evidence using the new `submissionHandle` returned with
-   it.
-3. Do not repeat a failed approach without addressing its cause. Carry valid
-   discoveries into the redo evaluation.
+When a backtrack occurs, read the protected Recovery Brief and the current
+prompt. Do not restore the workspace yourself: LoopForge already did, and
+running git reset/stash/checkout would move outside the verified target. The
+redo prompt is already compiled from the verified post-restore baseline; submit
+its work and evidence with the new `submissionHandle` returned with it. Do not
+repeat a failed approach without addressing its cause; carry valid discoveries
+into the redo evaluation.
 
 If the rolled-back work used an active contract, follow the Recovery Brief and
 live `submission_guidance` for that contract. Do not blindly restate or replace
-it; a successor proposal is subject to the same contract lifecycle rules.
+it; a successor proposal is subject to the same contract lifecycle.
 
 ## Workspace checkpoints
 
@@ -64,125 +44,90 @@ and blobs hold only what HEAD cannot reproduce.
 - A checkpoint creates no round, no commit, and no progress. It is visible as a
   recovery target only through the held transaction's ref list.
 - A successful checkpoint leaves the `submissionHandle` unchanged.
-- Re-capturing the same state is idempotent; distinct savepoints are capped.
 - Checkpoints never feed Canonical State, prompts, acceptance, progress, or
   stall.
+
+The live tool schema and migration rules own idempotence, caps, and manifest
+validation. Do not infer them from this concept page.
 
 ## Prompt levels
 
 L0, L1, and L2 select prompt density only; they never control which evaluation
 fields you may use. Each density can accompany a clean-context model
-conversation or an in-context retry; read `contextMode` and `contextReason`.
-The runtime selection rules and the context boundary live in the prompt's
-`## Round Boundary` section, its context-strategy label, and the MCP server
-instructions; this reference does not restate them.
+conversation or an in-context retry. Read the prompt header's `contextMode`,
+`contextReason`, and strategy label, plus its `## Round Boundary` section and
+the MCP server instructions. This reference does not restate those rules.
 
 The optional `currentUserInstruction` on `loopforge_next` / `loopforge_resume`
 is invocation input: it is rendered in the prompt and recorded in that prompt's
-artifact, and never rewrites the task, Objective, criteria, constraints or
-Round Contract. Omitting it means the prompt says "not provided"; never infer
-it from the old task or transcript.
+artifact, and never rewrites the task, Objective, criteria, constraints, or
+Round Contract. Omitting it makes the prompt say it was not provided; never
+infer it from an old task or transcript.
 
 Every level renders the same protected normative set: active criteria, every
-active constraint, the active contract and all its items, every active sub-goal
-id, every current verification finding, and the committed recovery brief. A
-clean-context prompt also renders the previous committed round's **Machine
-Evidence** when present. Display caps may shorten
-descriptions but never remove ids. If a protected active id is missing,
-LoopForge fails closed with `projection_incomplete` instead of delivering a
-partial prompt. The delivered prompt equals the compiled `renderedPrompt` on
-every path.
+active constraint, the active contract and its items, every active sub-goal id,
+every current verification finding, and the committed recovery brief. Display
+caps may shorten descriptions but never remove ids. If a protected active id is
+missing, LoopForge fails closed with `projection_incomplete` instead of
+delivering a partial prompt. The delivered prompt equals the compiled
+`renderedPrompt` on every path.
 
 A clean-context (`fresh_invocation`) prompt may render a bounded **Working
-Memory** section derived from committed history. L1 and L2 render the same full fixed projection: up to
-five reports, eight assumptions, six open questions, three recoveries and
-three contract redirects, with per-item text limits. L0 stays compact (one
-report, two assumptions, two questions, one recovery and one redirect). The
-underlying source window is five committed rounds for reports, assumptions and
-redirects; open questions remain active until resolved, and recovery directives
-have their own fixed limit. These limits are code constants, not policy. The
-default whole-prompt ceilings are
-5,000 / 50,000 / 100,000 characters for L0 / L1 / L2. They are safety ceilings,
-not routine targets for memory omission.
-
-Working Memory is optional but INDIVISIBLE: if it cannot fit, it is dropped
-whole, and the artifact records `rendered:false` with source counts. Every
-omission has source/rendered/omitted counts and a deterministic abbreviation
-notice. It declares no normative ids and never changes coverage, level,
-freshness, gates or success. A `same_round_retry` renders neither Working Memory
-nor Machine Evidence at any density; it relies on the rejection notice and
-Verification Gate. A `fresh_invocation` retry with `rejection_escalation` may
-render the previous posture plus the rejected attempt's transient, explicitly
-`not committed` posture. A `fresh_invocation` / `invocation_recovery` prompt is
-the cold replacement of a lost in-context retry for the SAME round/attempt:
-`loopforge_resume(loopId, invocationLost: true)` recompiles it at L2 with the
-rejection notice, findings, previous Machine Evidence, bounded Working Memory
-and the rejected attempt's posture. The state
-file carries the full fixed Working Memory window.
+Memory** section derived from committed history. Working Memory is optional but
+indivisible: if it cannot fit, it is dropped whole, and the artifact records
+`rendered:false` with source/rendered/omitted counts. Every omission has a
+deterministic abbreviation notice. It declares no normative ids and never
+changes coverage, level, freshness, gates, or success. A `same_round_retry`
+renders neither Working Memory nor Machine Evidence; it relies on the rejection
+notice and Verification Gate. A fresh retry may render the previous committed
+posture plus the rejected attempt's transient, explicitly `not committed`
+posture. The live prompt and artifact state which sections actually rendered;
+this reference does not restate windows, caps, or ceilings.
 
 ## Read-only views
 
 Use these to inspect, never to advance:
 
-- `loopforge_status` `view: "session"`: live session status, current round,
-  the current held `submissionHandle`, `machineBackedSuccessTrajectory`,
-  `evidencePosture`/`machineBackedSuccess`, checkpoints, capability, current
-  guidance, and the latest committed receipt. Accepts the
-  live `sessionId` or the durable `loopId`. A persisted STOPPED loop is
-  readable by `loopId` without resuming: it returns `status`, the committed
-  `loopStopReason`, the Agent stop facts, `stopDetail` and `last_submission`.
-  A running/paused/stalled loop without a live session still means call
-  `loopforge_resume`. It never returns the held prompt: a
-  null handle, a missing live session, or a lost prompt means call
-  `loopforge_resume`. A paused or stalled session may still show its handle, but
-  submissions are refused until resume.
+- `loopforge_status` `view: "session"`: live session status, current round, the
+  current held `submissionHandle`, machine-backed success trajectory,
+  evidence posture, checkpoints, capability, current guidance, and the latest
+  committed receipt. Accepts the live `sessionId` or durable `loopId`. A
+  persisted STOPPED loop is readable by `loopId` without resuming. A
+  running/paused/stalled loop without a live session means call
+  `loopforge_resume`. It never returns the held prompt.
 - `loopforge_status` `view: "loop"`: committed health counts.
 - `loopforge_status` `view: "all"`: every persisted loop summary.
 - `loopforge_status` `view: "audit"`: end-of-loop verification completeness.
 - `loopforge_status` `view: "explain"` (with `round`): the per-round "why" view
-  over committed facts, including the committed report (even without an
-  execution_report), context boundary, assumptions, open questions, blocker,
-  the persisted `evidencePosture`, full before/after command observations,
-  committed checkpoints and restore marker, and rollback digest facts.
-- `loopforge_replay`: committed round timeline and diffs. Pass `loopId` (or a
-  live `sessionId`) and optional `start` / `end`. With no window it returns the
-  last 10 committed rounds; an explicit window may span at most 50 rounds. The
-  response includes `window: { start, end, totalRounds, hasBefore, hasAfter }`
-  and each round's `attempt`, `context_mode`, `context_reason`, `outcome`,
-  bounded `report`, `wrong_assumptions`, `retracted_constraints`,
-  `open_questions`, `blocker` and `contract_redirect`. `rollbacks` carries
-  `failedRounds`, `approaches` and `wrongAssumptions`. Legacy envelope rows stay
+  over committed facts, including the committed report, context boundary,
+  assumptions, open questions, blocker, persisted evidence posture, command
+  observations, checkpoints and restore marker, and rollback digest facts.
+- `loopforge_replay`: committed round timeline and diffs. The live tool schema
+  states the accepted window. Each round carries its attempt, context mode and
+  reason, outcome, bounded report, wrong assumptions, retracted constraints,
+  open questions, blocker, and contract redirect. Legacy envelope rows stay
   visible instead of disappearing.
-- `loopforge_status` `view: "session"` / `view: "loop"` / `view: "audit"`: live
-  and committed health views.
 
 The optional `.loopforge/state/<loopId>-state.md` is derived and regenerable.
-Read it when the prompt points to it (current governance + bounded Working
-Memory + diagnostic views), but never treat it as a second source of truth:
-committed typed rounds are authoritative, the file's Agent-reported summaries
-are claims, and a state hash that differs from the prompt header means the file
-is stale. Re-align with status or resume.
+Read it when the prompt points to it, but never treat it as a second source of
+truth: committed typed rounds are authoritative, the file's Agent-reported
+summaries are claims, and a state hash that differs from the prompt header
+means the file is stale. Re-align with status or resume.
 
 ## Gates and delegation
 
-The two gate tools are opt-in through `policy.gate.enabled`. When enabled:
-
-- `loopforge_gate_check` preflights a structured action with its description,
-  scope, effects, reversibility, and authorization. It takes the current
-  `submissionHandle` and the action; it never executes or approves anything.
-- Classification is conservative: anything not provably safe becomes
-  `user_required`.
-- Present the approval question, record the decision with
-  `loopforge_gate_resolve` (`sessionId` + `gateId`), and cite the approved gate
-  id in `evaluation.gate_ids`.
-- LoopForge records the process, but cannot prove a human was present because
-  the Agent submits the resolve call.
-- Safe investigation and dry-runs need no gate.
+The gate tools are opt-in through `policy.gate.enabled`. When enabled, use the
+live tool schema for `loopforge_gate_check` and `loopforge_gate_resolve`: the
+check preflights an action and never executes or approves anything; the resolve
+records a human decision. Present the approval question, then cite the approved
+gate id where the evaluation schema asks for it. LoopForge records the process
+but cannot prove a human was present because the Agent submits the resolve
+call.
 
 Delegation does not create another LoopForge mode. Give each worker a
-self-contained subtask and hard constraints, then place the result in
-`worker_results` with `agentId`, `subTask`, `resultSummary`, and `outcome`.
-The result is saved with the committed transaction as an audit report. It does
-not enter the global constraint set by itself. If you accept a worker's finding,
-state it in top-level `discovered_constraints`; that is the only promotion
-channel.
+self-contained subtask and hard constraints, then place the result in the
+evaluation's worker-results field. The result is saved with the committed
+transaction as an audit report. It does not enter the global constraint set by
+itself. If you accept a worker's finding, state it in top-level
+`discovered_constraints`; that is the only promotion channel. The live
+`submission_guidance` states the current legal shape.

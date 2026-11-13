@@ -66,8 +66,9 @@ export const CURRENT_USER_INSTRUCTION_NOT_PROVIDED =
  *  invocation input; it never edits the loop's objective or acceptance. */
 export const CURRENT_USER_INSTRUCTION_AUTHORITY =
   "Host-provided current user instruction for this invocation. It does not " +
-  "rewrite the Objective, Success Criteria, hard constraints, or the Round " +
-  "Contract; a changed objective or acceptance requires a new loop.";
+  "rewrite the working Objective, Success Criteria, hard constraints, or the " +
+  "Round Contract. The working Objective changes only through a committed " +
+  "`objective_refinement`; changing Operator Acceptance requires a new loop.";
 
 /** v3.7.1: Presentation view of sub-goals shared by prompts and the state
  *  file (one derivation, no second copy). Only ACTIVE items render as rows

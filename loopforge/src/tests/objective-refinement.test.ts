@@ -158,7 +158,10 @@ describe("v4.0.6 — objective_refinement", () => {
       "The revised overall objective",
     ));
     const prompt = String(accepted.prompt);
-    const currentTask = prompt.split("## Current Task")[1] ?? "";
+    const marker = prompt.includes("### Objective / Current Task")
+      ? "### Objective / Current Task"
+      : "## Current Task";
+    const currentTask = prompt.split(marker)[1] ?? "";
     assert.ok(currentTask.includes("The revised overall objective"));
   });
 

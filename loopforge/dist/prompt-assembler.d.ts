@@ -46,10 +46,5 @@ export interface PromptAssemblyInput {
  *  guidance can quote the same wording without depending on a renderer.
  *  Re-exported here for the existing CHECK_* coverage test. */
 export { verificationActionFor } from "./verification-actions.js";
-/** v3.9.7: the ONE finding renderer, shared by the Verification Gate, the L0
- *  retry section and Critical Context. The `f-` id is the stable handle the
- *  Agent can cite; the detail is a machine fact and the action is the one
- *  canonical short action from `verification-actions.ts`. */
-export declare function verificationFlagLine(flag: CanonicalLoopState["verificationFlags"][number], level?: "l0" | "l1" | "l2"): string;
 export declare function assemblePromptArtifact(input: PromptAssemblyInput): PromptArtifact;
 //# sourceMappingURL=prompt-assembler.d.ts.map

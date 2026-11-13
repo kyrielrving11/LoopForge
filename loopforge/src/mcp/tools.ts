@@ -218,35 +218,13 @@ const TOOL_BASE_SCHEMAS = [
               items: { type: "string" as const },
               description: fieldGuideDescription("emerged_subtasks"),
             },
+            // prepareInputSchema reduces non-core evaluation fields to their
+            // description on the wire; the full shape stays in the per-round
+            // submission_guidance. Keeping the nested schema here would be a
+            // second, unreachable copy.
             execution_report: {
               type: "object" as const,
-              description: "Optional. Structured record of what actually happened this round.",
-              properties: {
-                files_changed: {
-                  type: "array" as const,
-                  items: { type: "string" as const },
-                  description: fieldGuideDescription("execution_report.files_changed"),
-                },
-                claims: {
-                  type: "array" as const,
-                  maxItems: 100,
-                  description: fieldGuideDescription("execution_report.claims"),
-                  items: {
-                    type: "object" as const,
-                    properties: {
-                      id: {
-                        type: "string" as const,
-                        description:
-                          "cr-XXXXXXXX objective criterion id or rci-XXXXXXXX " +
-                          "id of an item of the ACTIVE contract.",
-                      },
-                      outcome: { type: "string" as const, enum: ["met", "remaining"] },
-                    },
-                    required: ["id", "outcome"],
-                    additionalProperties: false,
-                  },
-                },
-              },
+              description: "Optional. Structured execution report; see submission_guidance for files_changed and claims.",
             },
             retracted_constraints: {
               type: "array" as const,
@@ -357,99 +335,6 @@ const TOOL_BASE_SCHEMAS = [
             round_contract: {
               type: "object" as const,
               description: fieldGuideDescription("round_contract"),
-              properties: {
-                work_item: {
-                  type: "string" as const,
-                  minLength: 1,
-                  maxLength: 200,
-                  description:
-                    "Required. The bounded deliverable this contract slice " +
-                    "produces — an outcome, not an activity. Rendered as the " +
-                    "Current Task heading. 1–200 chars.",
-                },
-                items: {
-                  type: "array" as const,
-                  minItems: 1,
-                  maxItems: 20,
-                  description:
-                    "Required, at least one (max 20). Each item is an " +
-                    "acceptance condition for the deliverable, bound to its own " +
-                    "evidence commands. The runtime derives a stable " +
-                    "rci-XXXXXXXX id per item and renders it in the prompt — " +
-                    "cite that id in execution_report.claims.",
-                  items: {
-                    type: "object" as const,
-                    properties: {
-                      description: {
-                        type: "string" as const,
-                        minLength: 1,
-                        maxLength: 200,
-                        description:
-                          "What must be true for this acceptance condition. " +
-                          "1–200 chars.",
-                      },
-                      criterion_refs: {
-                        type: "array" as const,
-                        maxItems: 20,
-                        items: { type: "string" as const },
-                        description: "Optional. Real cr-XXXXXXXX ids of ACTIVE criteria rendered in this prompt. Free text and unknown ids are rejected. Max 20.",
-                      },
-                      verify_with: {
-                        type: "array" as const,
-                        minItems: 1,
-                        maxItems: 20,
-                        items: { type: "string" as const },
-                        description:
-                          "Required, at least one. Names of configured, " +
-                          "enabled, after-capable evidence.commands " +
-                          "(loop_policy.json) that check this acceptance " +
-                          "condition. Unknown or disabled names are rejected. A " +
-                          "command may be shared by multiple conditions.",
-                      },
-                    },
-                    required: ["description", "verify_with"],
-                    additionalProperties: false,
-                  },
-                },
-                scope: {
-                  type: "array" as const,
-                  maxItems: 50,
-                  items: { type: "string" as const },
-                  description:
-                    "Optional, report-only. The files/directories you intend " +
-                    "this slice to touch. Omission and [] both mean no declared " +
-                    "intent. It is NOT enforced and is not part of the rc- id: " +
-                    "out-of-scope changes are reported as an info fact and " +
-                    "never reject the round. Max 50 items.",
-                },
-                supersedes: {
-                  type: "object" as const,
-                  description:
-                    "Optional redirect modifier. Replaces the named ACTIVE " +
-                    "contract with this proposal's slice; its acceptance items " +
-                    "must differ. The old contract closes as superseded. Not " +
-                    "allowed with should_continue=false or outcome=blocked.",
-                  properties: {
-                    contract_id: {
-                      type: "string" as const,
-                      pattern: "^rc-[a-f0-9]{8}$",
-                      description:
-                        "The rc-XXXXXXXX id of the ACTIVE contract rendered in " +
-                        "this prompt. A stale/other id is rejected.",
-                    },
-                    reason: {
-                      type: "string" as const,
-                      maxLength: 500,
-                      description:
-                        "Optional Agent report, recorded verbatim for audit only.",
-                    },
-                  },
-                  required: ["contract_id"],
-                  additionalProperties: false,
-                },
-              },
-              required: ["work_item", "items"],
-              additionalProperties: false,
             },
           },
         },

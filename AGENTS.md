@@ -138,7 +138,9 @@ not the current workspace. When the host declares the in-context invocation
 lost (`invocationLost`), LoopForge recompiles the SAME round and attempt as
 `fresh_invocation / invocation_recovery` at L2; it is not a new round, a new
 attempt, a recovery or a restore. The state file is derived and is never the
-source of truth.
+source of truth. The prompt header, evaluation block and Round Boundary footer
+are minimal projections; detailed field prose stays in `submission-guidance.ts`
+and is returned once per round as `submission_guidance`.
 
 The current user instruction is invocation input, not loop identity: it
 projects into one prompt/artifact and never rewrites `session.task`,
@@ -162,7 +164,8 @@ second copy of the executable rules.
 The tool schema, the prompt evaluation block, `submission_guidance` and the
 receipt all read it. Never keep a second copy of field semantics. The full legal
 shape stays in guidance; optional fields are opportunities, not a coverage
-checklist.
+checklist. The prompt block names the applicable optional paths only; their
+`when`/`example`/`effect` stay in the per-round guidance.
 
 ### 9. Empty, unknown and not-applicable are three different states
 

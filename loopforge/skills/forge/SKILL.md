@@ -7,89 +7,65 @@ dispatch_intent: "Drive long-running coding work through LoopForge so it survive
 
 # Forge
 
-Use this skill when work needs more than one verified boundary. It is the
-operating guide for LoopForge MCP; it does not replace the MCP server instructions,
-the prompt's `## Round Boundary`, or live `submission_guidance`.
+Use this skill when work needs more than one verified boundary. It is a pointer
+manual: the MCP server instructions, the live prompt (including
+`## Round Boundary`), the `initialize`/`tools/list` schemas, and the per-round
+`submission_guidance` are authoritative. This file defines terms and routes; it
+does not restate executable rules.
 
 ## When to use
 
-Use Forge when the task needs several meaningful slices, must survive a restart
-or context loss, carries constraints or acceptance criteria across rounds, or
-needs machine-backed observations and an auditable record of rejection,
-recovery, drift, or approval. Do not use it for a one-pass edit, a question, or
-a task that finishes in one verified pass.
+Use Forge when work needs several meaningful slices, must survive a restart or
+context loss, carries constraints or acceptance criteria across rounds, or
+needs machine-backed observations and an auditable record.
 
 LoopForge has one factual source: committed typed round documents in the Vault.
 Canonical State is compiled from those documents and is the cognitive source.
-Prompts, receipts, state files, replay, audit, and explain are projections; do
-not treat them as a second ledger. The Agent still owns meaning, planning,
-tool use, edits, tests, and the choice to request recovery.
+Prompts, receipts, state files, replay, audit, and explain are projections. The
+Agent owns meaning, planning, tools, edits, tests, and the choice to recover.
 
-## Round lifecycle
+## Round lifecycle definitions
 
 Keep these boundaries separate:
 
-- A **logical round** is one coherent work slice with one before/after evidence
+- A **logical round** is one coherent work slice with one before/after
   boundary.
 - An **attempt** is a submission for that round. An enforcement rejection
   increases the attempt but does not create round history; an invalid payload
   has no lifecycle side effects.
 - A **Round Contract** is an optional proposal for the next bounded,
   machine-checkable slice. It is not a second plan ledger and does not decide
-  the current round boundary. With an enabled after-capable command, a
-  continuing round with a successor available must leave an active contract.
+  the current round boundary.
 - A **workspace checkpoint** is recovery material: an automatic before-image or
   an explicit `loopforge_checkpoint` savepoint. It is not progress or history.
 
 ```text
 prepared prompt -> Agent works -> loopforge_next(handle, evaluation | recovery)
-                                   |-- invalid payload: same handle, no state change
-                                   |-- reject: same round, new attempt and handle
-                                   |-- accept/continue: commit and prepare next round
-                                   |-- stop: commit the final round/evidence
-                                   |-- recovery/backtrack: restore and verify, then redo
+  invalid: same handle, no change | reject: new attempt/handle | accept: commit
+  stop: final commit | recovery: restore, verify, then redo
 ```
 
-LoopForge owns persistence, evidence collection, validation, and disposition.
-The Agent owns the work and the semantic decisions.
+LoopForge owns persistence, evidence, validation, and disposition.
 
 ## Context and continuity
 
-Every prompt that holds a round declares `contextMode`, `contextReason`, and a
-human-readable strategy label. Follow those values together:
+Every prompt declares `contextMode`, `contextReason`, and a strategy label in
+its header. Read them with the prompt's `## Round Boundary`; do not infer the
+boundary from prompt size or an older transcript.
 
-```text
-Context: clean context — next round (fresh_invocation; workspace continues)
-Context: clean context repair (fresh_invocation; rejection_escalation; same logical round; rejected posture is attempt-time only)
-Context: clean context repair + invocation recovery (fresh_invocation; invocation_recovery; same logical round; retry lessons carried)
-Context: in-context repair (same_round_retry; enforcement_retry; continue original invocation if alive; lessons injected)
-Context: clean context after restore (fresh_invocation; recovery_redo; lessons carried)
-```
+- `fresh_invocation` starts a new model conversation. It is not a host-runtime
+  restart requirement and not a workspace reset: the same loop/session identity
+  and modified workspace continue. Continuity comes from the prompt's committed
+  projection and any explicitly carried retry or recovery lessons.
+- `same_round_retry` is in-context repair. Continue the original invocation if
+  it exists; the rejection notice and findings are already in the prompt. If
+  that invocation is gone, use the route stated in the prompt's
+  `## Round Boundary` section.
 
-- `fresh_invocation` starts a new model conversation without the prior
-  transcript, tool outputs, or uncommitted reasoning. It does not restart the
-  host — it is not a host-runtime restart requirement — or reset the workspace:
-  the same loop/session identity and modified workspace continue. Continuity
-  comes from the prompt's committed projection and any explicitly carried retry
-  or recovery lessons.
-- `same_round_retry` is in-context repair below the repeated same-check
-  rejection threshold. Continue the original invocation if it exists; the
-  rejection notice and findings are already provided. If it is gone, call
-  `loopforge_resume(loopId, invocationLost: true)` and use the resulting
-  `fresh_invocation / invocation_recovery` prompt for the same round and
-  attempt.
-
-Rejection escalation, recovery redo, and invocation recovery use a new model
-conversation. Prompt density (`L0`, `L1`, `L2`) is independent of this
-boundary. Stable MCP material (`initialize` instructions, `tools/list` schemas,
-and installed skill files) may stay warm; LoopForge does not manage provider
-caches or implicit model habits. Read the prompt and
-`references/recovery-and-views.md` when the distinction matters.
-
-Working Memory is bounded, derived from committed branch history and rollback
-directives, and report-only. Machine Evidence is a separate protected
-projection. Neither is an independent history; Agent reports never become
-machine evidence.
+Prompts render bounded **Working Memory** separately from **Machine Evidence**.
+Both are projections, not independent history: Agent reports are claims, and
+Machine Evidence is a machine observation. Read the live labels in the prompt;
+read `references/recovery-and-views.md` for the concepts.
 
 ## Start or resume
 
@@ -108,17 +84,15 @@ Keep the returned identifiers:
 | `sessionId` | Live process session | stop, pause, and live session controls |
 | `submissionHandle` | Exact held round/attempt | `loopforge_next`, `loopforge_checkpoint`, `loopforge_gate_check` |
 
-Pass `submissionHandle` unchanged. A rejection returns a new handle; an invalid
-evaluation keeps the same one. A stale handle has no side effects. If only the
-handle is lost, re-anchor it with `loopforge_status`; if the prompt or live
-session is gone, use `loopforge_resume` with the durable `loopId`. A paused or
-stalled session must be resumed before submission.
-Stopped and legacy loops are read-only; status and replay do not reopen them.
+Pass `submissionHandle` unchanged; the live prompt, `submission_guidance`, and
+tool schema state the current handle rules. If only the handle is lost, re-anchor
+it with `loopforge_status`; if the prompt or live session is gone, use
+`loopforge_resume` with the durable `loopId`. Stopped and legacy loops are
+read-only.
 
-`currentUserInstruction` on `loopforge_next` or `loopforge_resume` is input for
-that invocation only. It never rewrites the task, objective, criteria,
-constraints, Round Contract, or goal identity. Never infer it from an older
-transcript.
+`currentUserInstruction` is invocation input only; it never rewrites the task,
+objective, criteria, constraints, contract, or goal identity. The live prompt
+and tool schema state its scope. Never infer it from an older transcript.
 
 ## Execute a round
 
@@ -128,85 +102,35 @@ transcript.
 3. Submit exactly one evaluation or one Agent-requested recovery with the
    current handle. They are mutually exclusive.
 
-The required evaluation fields are:
+The prompt's `## Round Boundary` and live `submission_guidance` define required
+fields, applicability, real ids, legal shapes, and usable commands. Read them
+before submitting. Include an optional field only when its event happened; a
+claim alone never verifies anything, and only machine observations do. Never
+invent an id.
 
-| Field | Meaning |
-| --- | --- |
-| `outcome` | `success`, `partial`, `failed`, or `blocked`; `success` and `blocked` require `should_continue=false`, and `blocked` requires a non-empty `blocker`. |
-| `output_summary` | What changed and what was verified this round. |
-| `constraint_violations` | Real violations, preferably using rendered `c-*` ids. |
-| `should_continue` | Whether the Agent requests a successor round; false only when the objective is complete or the Agent must stop. |
-
-A completed slice does not necessarily complete the whole task.
-
-Optional fields are event-driven reports, not a checklist. Read the current
-`submission_guidance` for applicability, real ids, legal shapes, and usable
-commands. Omit fields for events that did not happen. In particular:
-
-- `execution_report.files_changed` is the net workspace change from round
-  preparation, including deletions; a commit alone is not a file change.
-- There is no Agent-reported test count. Configured command observations are
-  the test facts.
-- `execution_report.claims` is the single claims channel. Claims cite rendered
-  criterion or active contract-item ids, but a claim alone verifies nothing.
-- Never invent ids; use only ids rendered in the prompt or guidance. Unknown or
-  unavailable observations stay unknown, never a pass or an empty change set.
-- `no_change_reason` is allowed only when no verification command is configured;
-  it does not create evidence. Agent reports and receipts are not evidence.
-
-Use the evidence and contract reference before proposing or redirecting a Round
-Contract. Use the recovery reference before requesting recovery, interpreting
-backtrack, or relying on prompt-level details. A recovery request is an action,
-not an evaluation; LoopForge restores and verifies the target before issuing
-the redo prompt. Never restore the workspace yourself after backtrack.
+Use the evidence/contract reference before proposing or redirecting a contract,
+and the recovery reference before requesting recovery or interpreting a
+backtrack. Recovery is an action, not an evaluation; LoopForge restores and
+verifies the target before issuing the redo prompt. Never restore the workspace
+yourself after backtrack.
 
 ## Interpret results
 
-- A non-null `prompt` is the next held work slice; execute it and submit with
-  the returned handle.
-- `enforcementAction: "reject"` keeps the logical round and returns a new
-  handle. Follow its context strategy; never resubmit the old handle.
-- `enforcementAction: "backtrack"` or Agent `recovery` with a non-null `prompt`
-  means LoopForge restored and verified the workspace; continue only from the
-  new redo prompt. A failed restore returns no prompt, keeps the directive
-  pending, and is retried with `loopforge_resume`.
-- A stalled result with no prompt is handled with `loopforge_resume`; use
-  `loopforge_status` only to re-anchor a handle when the prompt is still live.
-- When `prompt` is null, read `stopReason`, `sessionStatus`, and the Agent's
-  stop facts. `completed` is a lifecycle result of the Agent's stop declaration
-  passing the configured gates; it is not machine-verified task success.
-
-Read `submission_receipt.verification.evidence_posture` for the persisted
-Machine Evidence and `machineBackedSuccess` for the verification gate's single
-machine-backed success fact. Keep it separate from `agentOutcome`,
-`agentSuccessClaim`, and `agentShouldContinue`.
-
-Errors are structured. Branch on `error.code`, not message prose. Correct
-retryable `evaluation_invalid`, `contract_invalid`, `policy_invalid`, or handle
-errors with the current handle. Do not blindly resubmit for
-`session_not_found`, `state_unavailable`, or `gate_disabled`.
-
-## Rules to keep
-
-- Keep one loop focused on one user objective; do not create a round for every
-  file, command, test, commit, or elapsed interval.
-- Use the handle returned for the current attempt and never edit or reconstruct
-  it.
-- Report only events that happened; do not fill optional fields for coverage.
-- Do not invent a contract when no configured command can verify it.
-- Do not treat a receipt, state file, or Agent report as committed evidence.
-- Restore the verified boundary before continuing after backtrack.
-- Do not continue after `prompt: null` without interpreting the stop facts.
+- A non-null `prompt` is the next held slice; execute it and submit with the
+  returned handle.
+- Branch on the structured `error.code`, not message prose. `enforcementAction`,
+  `recovery`, `stopReason`, and `sessionStatus` are live result facts.
+- `submission_receipt.verification.evidence_posture` carries persisted Machine
+  Evidence; `machineBackedSuccess` is the gate's single machine-backed success
+  fact. Keep both separate from `agentOutcome`/`agentSuccessClaim`.
+- `completed` is a lifecycle result, not universal proof of correctness.
 
 ## References
 
-Read these only when the current slice needs the detail. The live
-`submission_guidance` remains authoritative for field applicability, legal
-shapes, real ids, and usable commands.
+Read these only when the current slice needs the detail. The live prompt,
+`submission_guidance`, and `tools/list` schema remain authoritative.
 
 - [`references/evidence-and-contracts.md`](references/evidence-and-contracts.md):
-  Round Contracts, item closure, evidence commands, ids, and Agent/operator
-  judgment boundaries.
+  contract concepts, item closure, evidence commands, ids, judgment boundaries.
 - [`references/recovery-and-views.md`](references/recovery-and-views.md):
-  recovery and backtrack, checkpoint authority, prompt levels, read-only views,
-  gates, delegation, and the derived state file.
+  recovery/backtrack, checkpoints, prompt density, views, gates, delegation.
